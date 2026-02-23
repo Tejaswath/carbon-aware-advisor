@@ -22,6 +22,7 @@ using Electricity Maps carbon-intensity data, explicit policy rules, human appro
 - [9. API Reference (Routing-First Contract)](#9-api-reference-routing-first-contract)
 - [10. Environment Variables](#10-environment-variables)
 - [11. Local Development and Runbook](#11-local-development-and-runbook)
+- [11.4 Azure + Vercel Deployment Runbook](#114-azure--vercel-deployment-runbook)
 - [12. Testing](#12-testing)
 - [13. Demo Playbook (Interview-Ready)](#13-demo-playbook-interview-ready)
 - [14. Operational Notes](#14-operational-notes)
@@ -399,6 +400,24 @@ npm run dev
 
 ### 11.3 Open UI
 - [http://localhost:3000](http://localhost:3000)
+
+### 11.4 Azure + Vercel Deployment Runbook
+
+Use the dedicated step-by-step deployment guide:
+
+- `/Users/tejaswath/projects/carbon_advisor/deploy/azure_vercel_phase2.md`
+
+App Service environment template:
+
+- `/Users/tejaswath/projects/carbon_advisor/deploy/appservice_settings.env.example`
+
+Post-deploy smoke check command:
+
+```bash
+bash /Users/tejaswath/projects/carbon_advisor/scripts/smoke_prod.sh \
+  "https://<your-frontend>.vercel.app" \
+  "https://<your-backend>.azurewebsites.net/api/v1"
+```
 
 ## 12. Testing
 
