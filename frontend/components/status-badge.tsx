@@ -15,3 +15,26 @@ export function StatusBadge({ status }: { status: DecisionStatus }) {
     </span>
   );
 }
+
+const actionStyleMap = {
+  run_now_local: "bg-emerald-100 text-emerald-800 border-emerald-200",
+  route_to_clean_region: "bg-blue-100 text-blue-800 border-blue-200",
+  require_manager_decision: "bg-amber-100 text-amber-800 border-amber-200",
+  pending: "bg-slate-100 text-slate-700 border-slate-200"
+} as const;
+
+function actionLabel(action: "run_now_local" | "route_to_clean_region" | "require_manager_decision" | null): string {
+  if (action === "run_now_local") return "Run Local";
+  if (action === "route_to_clean_region") return "Route to Clean Region";
+  if (action === "require_manager_decision") return "Manager Approval Required";
+  return "Pending";
+}
+
+export function PolicyActionBadge({
+  action
+}: {
+  action: "run_now_local" | "route_to_clean_region" | "require_manager_decision" | null;
+}) {
+  const style = action ? actionStyleMap[action] : actionStyleMap.pending;
+  return <span className={`inline-flex rounded-full border px-3 py-1 text-xs font-semibold ${style}`}>{actionLabel(action)}</span>;
+}

@@ -2,12 +2,14 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { StatusBadge } from "@/components/status-badge";
+import { PolicyActionBadge, StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
 import { DecisionResponse, DemoScenario, ManagerOption } from "@/lib/types";
 
 const POLL_MS = 2000;
 const TIMEOUT_MS = 90000;
+const GEOLOCATION_TIMEOUT_MS = 15000;
+const MARGINAL_OVER_THRESHOLD_FACTOR = 1.3;
 const DEFAULT_PRIMARY_ZONES = ["SE-SE1", "SE-SE2", "SE-SE3", "SE-SE4"];
 const CONFIGURED_PRIMARY_ZONES = (
   process.env.NEXT_PUBLIC_PRIMARY_ZONES ?? DEFAULT_PRIMARY_ZONES.join(",")
@@ -29,6 +31,9 @@ const COUNTRY_LABELS: Record<string, string> = {
 };
 const PRIMARY_ZONE_STORAGE_KEY = "carbon_advisor.primary_zone";
 const MANAGER_ID_STORAGE_KEY = "carbon_advisor.manager_id";
+const APPROVER_NAME_STORAGE_KEY = "carbon_advisor.approver_name";
+const APPROVER_ORG_STORAGE_KEY = "carbon_advisor.approver_org";
+const INTRO_SEEN_STORAGE_KEY = "carbon_advisor.intro_seen";
 const DEMO_SCENARIO_LABELS: Record<DemoScenario, string> = {
   clean_local: "Demo: Clean Local",
   routeable_dirty: "Demo: Routeable Dirty",
@@ -63,6 +68,8 @@ type TradeoffRow = {
   dataResidency: string;
   costImpact: string;
 };
+
+type IntensitySeverity = "clean" | "marginal" | "dirty" | "unknown";
 
 const defaultDecision: DecisionResponse = {
   decision_id: "",
@@ -162,6 +169,45 @@ function estimatedLatency(primaryZone: string | null, targetZone: string | null)
   return "+40-90ms";
 }
 
+function intensitySeverity(intensity: number | null, threshold: number): IntensitySeverity {
+  if (intensity === null) return "unknown";
+  if (intensity <= threshold) return "clean";
+  if (intensity <= threshold * MARGINAL_OVER_THRESHOLD_FACTOR) return "marginal";
+  return "dirty";
+}
+
+function intensityClassName(severity: IntensitySeverity): string {
+  if (severity === "clean") return "text-emerald-700";
+  if (severity === "marginal") return "text-amber-700";
+  if (severity === "dirty") return "text-red-700";
+  return "text-ink";
+}
+
+function geolocationErrorMessage(geoError: GeolocationPositionError): string {
+  if (geoError.code === 1) {
+    return "Location permission denied. Enable location access in your browser and retry.";
+  }
+  if (geoError.code === 2) {
+    return "Location unavailable. Check device location services and retry.";
+  }
+  if (geoError.code === 3) {
+    return "Location request timed out. Retry, or keep manual zone selection.";
+  }
+  return `Location unavailable: ${geoError.message || "Unknown geolocation error."}`;
+}
+
+function processingStepLabel(decision: DecisionResponse, uiState: "idle" | "submitting" | "processing" | "awaiting_approval" | "final" | "error"): string | null {
+  if (uiState === "awaiting_approval") return "Awaiting manager decision...";
+  if (uiState !== "processing") return null;
+  if (decision.timeline.length === 0) return "Initializing decision...";
+  const stages = new Set(decision.timeline.map((event) => event.stage));
+  if (stages.has("timeline.finalized") || stages.has("audit.generated")) return "Generating audit...";
+  if (stages.has("execution.final")) return "Finalizing execution...";
+  if (stages.has("policy.result")) return "Evaluating policy...";
+  if (stages.has("sensor.primary") || stages.has("sensor.candidates")) return "Sensing grid...";
+  return "Preparing decision...";
+}
+
 export default function HomePage() {
   const [estimatedKwhStr, setEstimatedKwhStr] = useState<string>("500");
   const [thresholdStr, setThresholdStr] = useState<string>("40");
@@ -170,8 +216,13 @@ export default function HomePage() {
   const [thresholdPreset, setThresholdPreset] = useState<ThresholdPresetKey>(thresholdPresetForValue(40));
   const [zone, setZone] = useState<string>(CONFIGURED_PRIMARY_ZONES[0] ?? "SE-SE3");
   const [managerId, setManagerId] = useState<string>("manager@example.com");
+  const [approverName, setApproverName] = useState<string>("");
+  const [approverOrg, setApproverOrg] = useState<string>("");
+  const [showApproverProfile, setShowApproverProfile] = useState<boolean>(false);
   const [overrideReason, setOverrideReason] = useState<string>("");
   const [geoHint, setGeoHint] = useState<string>("");
+  const [canRetryGeo, setCanRetryGeo] = useState<boolean>(false);
+  const [showIntroModal, setShowIntroModal] = useState<boolean>(false);
 
   const [decision, setDecision] = useState<DecisionResponse>(defaultDecision);
   const [decisionId, setDecisionId] = useState<string>("");
@@ -185,11 +236,25 @@ export default function HomePage() {
     if (typeof window === "undefined") return;
     const savedZone = window.localStorage.getItem(PRIMARY_ZONE_STORAGE_KEY);
     const savedManagerId = window.localStorage.getItem(MANAGER_ID_STORAGE_KEY);
+    const savedApproverName = window.localStorage.getItem(APPROVER_NAME_STORAGE_KEY);
+    const savedApproverOrg = window.localStorage.getItem(APPROVER_ORG_STORAGE_KEY);
+    const introSeen = window.localStorage.getItem(INTRO_SEEN_STORAGE_KEY);
     if (savedZone) {
       setZone(savedZone);
     }
     if (savedManagerId) {
       setManagerId(savedManagerId);
+    }
+    if (savedApproverName) {
+      setApproverName(savedApproverName);
+      setShowApproverProfile(true);
+    }
+    if (savedApproverOrg) {
+      setApproverOrg(savedApproverOrg);
+      setShowApproverProfile(true);
+    }
+    if (!introSeen) {
+      setShowIntroModal(true);
     }
   }, []);
 
@@ -202,6 +267,16 @@ export default function HomePage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(MANAGER_ID_STORAGE_KEY, managerId);
   }, [managerId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(APPROVER_NAME_STORAGE_KEY, approverName);
+  }, [approverName]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(APPROVER_ORG_STORAGE_KEY, approverOrg);
+  }, [approverOrg]);
 
   useEffect(() => {
     if (!shouldPoll) return;
@@ -248,6 +323,7 @@ export default function HomePage() {
       setUiState("submitting");
       setError("");
       setGeoHint("");
+      setCanRetryGeo(false);
       setOverrideReason("");
 
       const started = await api.startDecision({
@@ -267,27 +343,49 @@ export default function HomePage() {
     }
   };
 
+  const onResetDecision = () => {
+    setDecision(defaultDecision);
+    setDecisionId("");
+    setUiState("idle");
+    setError("");
+    setGeoHint("");
+    setCanRetryGeo(false);
+    setOverrideReason("");
+    startedAtRef.current = null;
+  };
+
+  const dismissIntroModal = () => {
+    setShowIntroModal(false);
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(INTRO_SEEN_STORAGE_KEY, "1");
+  };
+
   const onSuggestPrimaryZone = () => {
     if (typeof window === "undefined" || !window.navigator.geolocation) {
-      setGeoHint("Geolocation is not available in this browser.");
+      setGeoHint("Geolocation is not available in this browser. Use manual zone selection.");
+      setCanRetryGeo(false);
       return;
     }
 
     setGeoHint("Detecting location...");
+    setCanRetryGeo(false);
     window.navigator.geolocation.getCurrentPosition(
       ({ coords }) => {
         const suggested = inferSwedenZoneFromCoordinates(coords.latitude, coords.longitude);
         if (!suggested) {
           setGeoHint("Could not map your location to SE-SE1..SE-SE4. Keep manual selection.");
+          setCanRetryGeo(true);
           return;
         }
         setZone(suggested);
         setGeoHint(`Suggested ${zoneLabel(suggested)} from your current location.`);
+        setCanRetryGeo(false);
       },
       (geoError) => {
-        setGeoHint(`Location unavailable: ${geoError.message}`);
+        setGeoHint(geolocationErrorMessage(geoError));
+        setCanRetryGeo(true);
       },
-      { enableHighAccuracy: false, timeout: 7000, maximumAge: 300000 }
+      { enableHighAccuracy: false, timeout: GEOLOCATION_TIMEOUT_MS, maximumAge: 300000 }
     );
   };
 
@@ -398,6 +496,9 @@ export default function HomePage() {
   const saved = decision.estimated_kgco2_saved_by_routing ?? 0;
   const isRealized = decision.execution_mode === "routed" && saved > 0;
   const isForegone = decision.execution_mode === "local" && saved > 0;
+  const primaryIntensitySeverity = intensitySeverity(decision.primary_intensity, threshold);
+  const selectedIntensitySeverity = intensitySeverity(decision.selected_execution_intensity, threshold);
+  const activeProcessingStep = processingStepLabel(decision, uiState);
 
   const decisionExplanation = useMemo(() => {
     if (decision.status === "processing") {
@@ -487,7 +588,16 @@ export default function HomePage() {
               </p>
               <p className="mt-2 text-xs uppercase tracking-[0.15em] text-fern">Forecast Mode: Disabled (Routing-First)</p>
             </div>
-            <StatusBadge status={statusForBadge} />
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
+                onClick={() => setShowIntroModal(true)}
+              >
+                Help
+              </button>
+              <StatusBadge status={statusForBadge} />
+            </div>
           </div>
         </section>
 
@@ -570,10 +680,81 @@ export default function HomePage() {
                 >
                   Suggest from my location
                 </button>
-                {geoHint && <span className="text-xs text-fern">{geoHint}</span>}
+                {canRetryGeo && (
+                  <button
+                    type="button"
+                    className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern transition hover:bg-fern/10"
+                    onClick={onSuggestPrimaryZone}
+                  >
+                    Retry location
+                  </button>
+                )}
+                {geoHint && (
+                  <>
+                    <span className="text-xs text-fern">{geoHint}</span>
+                    <button
+                      type="button"
+                      className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern transition hover:bg-fern/10"
+                      onClick={() => {
+                        setGeoHint(`Using ${zoneLabel(zone)}. You can change the zone manually.`);
+                        setCanRetryGeo(false);
+                      }}
+                    >
+                      Use selected zone
+                    </button>
+                  </>
+                )}
               </div>
             </label>
           </div>
+
+          <div className="mt-5 grid gap-4 md:grid-cols-2">
+            <label className="space-y-2">
+              <span className="text-xs font-semibold uppercase tracking-wide text-fern">Manager ID (required for approvals)</span>
+              <input
+                className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
+                type="text"
+                value={managerId}
+                onChange={(e) => setManagerId(e.target.value)}
+                placeholder="name@company.com"
+              />
+            </label>
+            <div className="space-y-2">
+              <button
+                type="button"
+                className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
+                onClick={() => setShowApproverProfile((value) => !value)}
+              >
+                {showApproverProfile ? "Hide Approver Profile" : "Show Approver Profile"}
+              </button>
+              <p className="text-xs text-fern">Local-only metadata for demo context. Not sent to backend.</p>
+            </div>
+          </div>
+
+          {showApproverProfile && (
+            <div className="mt-3 grid gap-3 md:grid-cols-2">
+              <label className="space-y-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-fern">Approver Name</span>
+                <input
+                  className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
+                  type="text"
+                  value={approverName}
+                  onChange={(e) => setApproverName(e.target.value)}
+                  placeholder="Jane Svensson"
+                />
+              </label>
+              <label className="space-y-2">
+                <span className="text-xs font-semibold uppercase tracking-wide text-fern">Organization</span>
+                <input
+                  className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
+                  type="text"
+                  value={approverOrg}
+                  onChange={(e) => setApproverOrg(e.target.value)}
+                  placeholder="Nordea"
+                />
+              </label>
+            </div>
+          )}
 
           <div className="mt-6 flex flex-wrap gap-3">
             <button
@@ -604,6 +785,14 @@ export default function HomePage() {
             >
               Force Approval Path
             </button>
+            {(uiState === "final" || uiState === "error") && (
+              <button
+                className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10"
+                onClick={onResetDecision}
+              >
+                New Decision
+              </button>
+            )}
             {uiState === "awaiting_approval" &&
               decision.manager_options.map((option) => (
                 <button
@@ -623,17 +812,7 @@ export default function HomePage() {
             </button>
           </div>
           {uiState === "awaiting_approval" && (
-            <div className="mt-4 grid gap-3 md:grid-cols-2">
-              <label className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-fern">Manager ID (required)</span>
-                <input
-                  className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
-                  type="text"
-                  value={managerId}
-                  onChange={(e) => setManagerId(e.target.value)}
-                  placeholder="name@company.com"
-                />
-              </label>
+            <div className="mt-4 grid gap-3">
               <label className="space-y-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-fern">
                   Override Reason (required only for policy override)
@@ -665,6 +844,11 @@ export default function HomePage() {
               Run mode: {activeDemoScenario ? DEMO_SCENARIO_LABELS[activeDemoScenario] : "Live API"}
             </p>
           )}
+          {decisionId && activeProcessingStep && (
+            <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-fern">
+              Step: {activeProcessingStep}
+            </p>
+          )}
           {decisionId && (
             <p className="mt-3 rounded-lg border border-moss/30 bg-moss/5 px-3 py-2 text-sm text-ink">{decisionExplanation}</p>
           )}
@@ -679,13 +863,13 @@ export default function HomePage() {
         <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
           <article className="panel-strong rounded-2xl p-4">
             <p className="text-xs uppercase tracking-[0.14em] text-fern">Primary Zone Intensity</p>
-            <p className="mt-2 text-2xl font-bold text-ink">{decision.primary_intensity ?? "-"}</p>
+            <p className={`mt-2 text-2xl font-bold ${intensityClassName(primaryIntensitySeverity)}`}>{decision.primary_intensity ?? "-"}</p>
             <p className="text-sm text-fern">gCO2eq/kWh</p>
           </article>
           <article className="panel-strong rounded-2xl p-4">
             <p className="text-xs uppercase tracking-[0.14em] text-fern">Selected Execution Zone</p>
             <p className="mt-2 text-2xl font-bold text-ink">{decision.selected_execution_zone ?? "-"}</p>
-            <p className="text-sm text-fern">{decision.selected_execution_intensity ?? "-"} gCO2eq/kWh</p>
+            <p className={`text-sm ${intensityClassName(selectedIntensitySeverity)}`}>{decision.selected_execution_intensity ?? "-"} gCO2eq/kWh</p>
           </article>
           <article className="panel-strong rounded-2xl p-4">
             <p className="text-xs uppercase tracking-[0.14em] text-fern">Execution Mode</p>
@@ -728,9 +912,11 @@ export default function HomePage() {
         <section className="grid gap-4 lg:grid-cols-2">
           <article className="panel-strong rounded-2xl p-5">
             <h2 className="text-lg font-bold text-ink">Policy Decision</h2>
-            <p className="mt-3 text-sm text-fern">
-              <span className="font-semibold text-ink">Action:</span> {decision.policy_action ?? "pending"}
-            </p>
+            <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-fern">
+              <span className="font-semibold text-ink">Action:</span>
+              <PolicyActionBadge action={decision.policy_action} />
+              <span className="font-mono text-xs text-fern/80">{decision.policy_action ?? "pending"}</span>
+            </div>
             <p className="mt-2 text-sm text-fern">
               <span className="font-semibold text-ink">Reason:</span> {decision.policy_reason ?? "Waiting for evaluation..."}
             </p>
@@ -859,6 +1045,39 @@ export default function HomePage() {
           )}
         </section>
       </div>
+      {showIntroModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-moss/20 bg-white p-6 shadow-2xl">
+            <h2 className="text-xl font-bold text-ink">Welcome to Carbon-Aware Compute Advisor</h2>
+            <p className="mt-2 text-sm text-fern">
+              This dashboard decides whether compute workloads should run locally, route to a cleaner region, or be escalated for manager approval.
+            </p>
+            <div className="mt-4 space-y-3 text-sm text-fern">
+              <p>
+                <span className="font-semibold text-ink">Inputs:</span> Estimated Job Energy drives emissions math, Carbon Threshold sets policy strictness, and
+                Primary Grid Zone is the origin region for execution.
+              </p>
+              <p>
+                <span className="font-semibold text-ink">Actions:</span> Evaluate Live uses real API signals. Force buttons run deterministic scenarios for demo flows
+                (clean, routeable dirty, non-routeable dirty).
+              </p>
+              <p>
+                <span className="font-semibold text-ink">Governance:</span> Dirty scenarios can require manager decisions (`run_local`, `route`, `postpone`) with
+                auditable reasoning and CSV export.
+              </p>
+            </div>
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                className="rounded-xl border border-fern px-4 py-2 text-sm font-semibold text-fern transition hover:bg-fern/10"
+                onClick={dismissIntroModal}
+              >
+                Got it
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
