@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import { signOut, useSession } from "next-auth/react";
 
+import { ThemeToggle } from "@/components/theme-toggle";
 import { PolicyActionBadge, StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
+import { useThemePreference } from "@/lib/use-theme-preference";
 import { DecisionResponse, DemoScenario, ManagerOption, StartDecisionRequest } from "@/lib/types";
 
 const POLL_MS = 2000;
@@ -31,11 +34,9 @@ const COUNTRY_LABELS: Record<string, string> = {
   FI: "Finland"
 };
 const PRIMARY_ZONE_STORAGE_KEY = "carbon_advisor.primary_zone";
-const MANAGER_ID_STORAGE_KEY = "carbon_advisor.manager_id";
 const APPROVER_NAME_STORAGE_KEY = "carbon_advisor.approver_name";
 const APPROVER_ORG_STORAGE_KEY = "carbon_advisor.approver_org";
 const INTRO_SEEN_STORAGE_KEY = "carbon_advisor.intro_seen";
-const THEME_STORAGE_KEY = "carbon_advisor.theme";
 const DEMO_SCENARIO_LABELS: Record<DemoScenario, string> = {
   clean_local: "Demo: Grid Clean",
   routeable_dirty: "Demo: Route Available",
@@ -75,7 +76,6 @@ type TradeoffRow = {
 
 type IntensitySeverity = "clean" | "marginal" | "dirty" | "unknown";
 type UIState = "idle" | "submitting" | "processing" | "awaiting_approval" | "final" | "error";
-type ThemePreference = "system" | "light" | "dark";
 
 const defaultDecision: DecisionResponse = {
   decision_id: "",
@@ -260,13 +260,13 @@ function workflowStepIndex(decision: DecisionResponse, uiState: UIState): number
 }
 
 export default function HomePage() {
+  const { data: session, status: sessionStatus } = useSession();
   const [estimatedKwhStr, setEstimatedKwhStr] = useState<string>("500");
   const [thresholdStr, setThresholdStr] = useState<string>("40");
   const estimatedKwh = parsePositiveInt(estimatedKwhStr, 1);
   const threshold = parsePositiveInt(thresholdStr, 1);
   const [thresholdPreset, setThresholdPreset] = useState<ThresholdPresetKey>(thresholdPresetForValue(40));
   const [zone, setZone] = useState<string>(CONFIGURED_PRIMARY_ZONES[0] ?? "SE-SE3");
-  const [managerId, setManagerId] = useState<string>("manager@example.com");
   const [approverName, setApproverName] = useState<string>("");
   const [approverOrg, setApproverOrg] = useState<string>("");
   const [showApproverProfile, setShowApproverProfile] = useState<boolean>(false);
@@ -275,8 +275,7 @@ export default function HomePage() {
   const [canRetryGeo, setCanRetryGeo] = useState<boolean>(false);
   const [showIntroModal, setShowIntroModal] = useState<boolean>(false);
   const [showDemoScenarios, setShowDemoScenarios] = useState<boolean>(false);
-  const [themePreference, setThemePreference] = useState<ThemePreference>("system");
-  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
+  const { resolvedTheme, toggleTheme } = useThemePreference();
 
   const [decision, setDecision] = useState<DecisionResponse>(defaultDecision);
   const [decisionId, setDecisionId] = useState<string>("");
@@ -285,6 +284,7 @@ export default function HomePage() {
   const [selectedManagerAction, setSelectedManagerAction] = useState<ManagerOption | null>(null);
   const [armedManagerAction, setArmedManagerAction] = useState<ManagerOption | null>(null);
   const [lastStartPayload, setLastStartPayload] = useState<StartDecisionRequest | null>(null);
+  const approverEmail = session?.user?.email?.trim() ?? "";
 
   const startedAtRef = useRef<number | null>(null);
   const shouldPoll = uiState === "processing" && Boolean(decisionId);
@@ -292,14 +292,11 @@ export default function HomePage() {
   useEffect(() => {
     if (typeof window === "undefined") return;
     const savedZone = window.localStorage.getItem(PRIMARY_ZONE_STORAGE_KEY);
-    const savedManagerId = window.localStorage.getItem(MANAGER_ID_STORAGE_KEY);
     const savedApproverName = window.localStorage.getItem(APPROVER_NAME_STORAGE_KEY);
     const savedApproverOrg = window.localStorage.getItem(APPROVER_ORG_STORAGE_KEY);
     const introSeen = window.localStorage.getItem(INTRO_SEEN_STORAGE_KEY);
-    const savedThemePreference = window.localStorage.getItem(THEME_STORAGE_KEY);
 
     if (savedZone) setZone(savedZone);
-    if (savedManagerId) setManagerId(savedManagerId);
     if (savedApproverName) {
       setApproverName(savedApproverName);
       setShowApproverProfile(true);
@@ -309,20 +306,12 @@ export default function HomePage() {
       setShowApproverProfile(true);
     }
     if (!introSeen) setShowIntroModal(true);
-    if (savedThemePreference === "light" || savedThemePreference === "dark") {
-      setThemePreference(savedThemePreference);
-    }
   }, []);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(PRIMARY_ZONE_STORAGE_KEY, zone);
   }, [zone]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    window.localStorage.setItem(MANAGER_ID_STORAGE_KEY, managerId);
-  }, [managerId]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -333,27 +322,6 @@ export default function HomePage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(APPROVER_ORG_STORAGE_KEY, approverOrg);
   }, [approverOrg]);
-
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
-
-    const applyTheme = () => {
-      const shouldUseDark = themePreference === "dark" || (themePreference === "system" && mediaQuery.matches);
-      document.documentElement.classList.toggle("dark", shouldUseDark);
-      setResolvedTheme(shouldUseDark ? "dark" : "light");
-    };
-
-    applyTheme();
-    mediaQuery.addEventListener("change", applyTheme);
-    if (themePreference === "system") {
-      window.localStorage.removeItem(THEME_STORAGE_KEY);
-    } else {
-      window.localStorage.setItem(THEME_STORAGE_KEY, themePreference);
-    }
-
-    return () => mediaQuery.removeEventListener("change", applyTheme);
-  }, [themePreference]);
 
   useEffect(() => {
     if (!showIntroModal) return;
@@ -500,15 +468,6 @@ export default function HomePage() {
     );
   };
 
-  const toggleTheme = () => {
-    setThemePreference((current) => {
-      if (current === "system") {
-        return resolvedTheme === "dark" ? "light" : "dark";
-      }
-      return current === "dark" ? "light" : "dark";
-    });
-  };
-
   const recommendedManagerAction: ManagerOption | null = useMemo(() => {
     if (decision.policy_action === "route_to_clean_region") return "route";
     return null;
@@ -521,16 +480,12 @@ export default function HomePage() {
 
   const submitManagerAction = async (option: ManagerOption) => {
     if (!decisionId) return;
-    const cleanManagerId = managerId.trim();
+    const cleanManagerId = approverEmail;
     const cleanOverrideReason = overrideReason.trim();
     const isOverride = recommendedManagerAction !== null && option !== recommendedManagerAction;
 
     if (!cleanManagerId) {
-      setError("Approver email is required to submit approval actions.");
-      return;
-    }
-    if (!/.+@.+\..+/.test(cleanManagerId)) {
-      setError("Enter a valid approver email address before submitting approval actions.");
+      setError("Signed-in account is missing an email address. Sign out and sign back in with Google.");
       return;
     }
     if (isOverride && !cleanOverrideReason) {
@@ -628,7 +583,6 @@ export default function HomePage() {
   }, [zone]);
 
   const activeDemoScenario = useMemo(() => activeScenarioFromTimeline(decision), [decision]);
-  const isManagerEmailInvalid = managerId.trim().length > 0 && !/.+@.+\..+/.test(managerId.trim());
   const thresholdPresetDescription = useMemo(() => {
     if (thresholdPreset === "custom") {
       return "Custom threshold. Use policy presets for recommended defaults.";
@@ -646,6 +600,7 @@ export default function HomePage() {
   const selectedIntensitySeverity = intensitySeverity(decision.selected_execution_intensity, threshold);
   const activeProcessingStep = processingStepLabel(decision, uiState);
   const currentWorkflowStepIndex = workflowStepIndex(decision, uiState);
+  const showProcessingBar = uiState === "processing";
 
   const decisionExplanation = useMemo(() => {
     if (decision.status === "processing") {
@@ -738,6 +693,22 @@ export default function HomePage() {
   const showApprovalControls = uiState === "awaiting_approval";
   const auditParagraphs = splitAuditParagraphs(decision.audit_report);
 
+  if (sessionStatus === "loading") {
+    return (
+      <main className="px-4 py-8 md:px-8">
+        <div className="mx-auto max-w-6xl">
+          <section className="panel-strong rounded-3xl p-6 md:p-8">
+            <p className="text-sm text-fern">Checking session...</p>
+          </section>
+        </div>
+      </main>
+    );
+  }
+
+  if (sessionStatus === "unauthenticated") {
+    return null;
+  }
+
   return (
     <main className="px-4 py-8 md:px-8">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -752,19 +723,25 @@ export default function HomePage() {
               <p className="mt-2 text-xs uppercase tracking-[0.15em] text-fern">Forecast Mode: Disabled (Routing-First)</p>
             </div>
             <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
-                onClick={toggleTheme}
-              >
-                {resolvedTheme === "dark" ? "Light Mode" : "Dark Mode"}
-              </button>
+              {approverEmail && (
+                <span className="max-w-[220px] truncate rounded-full border border-moss/30 px-3 py-1 text-xs text-fern" title={approverEmail}>
+                  {approverEmail}
+                </span>
+              )}
+              <ThemeToggle resolvedTheme={resolvedTheme} onToggle={toggleTheme} />
               <button
                 type="button"
                 className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
                 onClick={() => setShowIntroModal(true)}
               >
                 Help
+              </button>
+              <button
+                type="button"
+                className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
+                onClick={() => void signOut({ callbackUrl: "/login" })}
+              >
+                Sign out
               </button>
               <StatusBadge status={statusForBadge} />
             </div>
@@ -888,17 +865,18 @@ export default function HomePage() {
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             <label className="space-y-2">
               <span className="text-xs font-semibold uppercase tracking-wide text-fern">Approver Email (required for approvals)</span>
-              <span className="block text-xs text-fern">Stored in the backend audit trail when governance actions are submitted.</span>
+              <span className="block text-xs text-fern">Sourced from your signed-in Google account and stored in the backend audit trail.</span>
               <input
-                className={`w-full rounded-xl border bg-white px-4 py-3 text-sm text-ink shadow-sm ${
-                  isManagerEmailInvalid ? "border-red-400 dark:border-red-700" : "border-moss/30"
-                }`}
+                className="w-full rounded-xl border border-moss/30 bg-moss/10 px-4 py-3 text-sm text-ink shadow-sm"
                 type="text"
-                value={managerId}
-                onChange={(e) => setManagerId(e.target.value)}
-                placeholder="name@company.com"
+                value={approverEmail || "Signed-in email unavailable"}
+                readOnly
               />
-              {isManagerEmailInvalid && <span className="block text-xs text-red-600 dark:text-red-400">Enter a valid email format.</span>}
+              {!approverEmail && (
+                <span className="block text-xs text-red-600 dark:text-red-400">
+                  This Google account does not expose an email address. Sign out and use another account.
+                </span>
+              )}
             </label>
             <div className="space-y-2">
               <div className="flex items-center gap-2">
@@ -1140,6 +1118,11 @@ export default function HomePage() {
                 </ol>
                 {activeProcessingStep && (
                   <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-fern">Step: {activeProcessingStep}</p>
+                )}
+                {showProcessingBar && (
+                  <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-moss/20 dark:bg-moss/35">
+                    <span className="block h-full w-1/3 rounded-full bg-emerald-500 motion-safe:animate-[indeterminate_1.35s_ease-in-out_infinite] dark:bg-emerald-400" />
+                  </div>
                 )}
               </div>
 

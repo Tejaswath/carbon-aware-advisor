@@ -144,6 +144,14 @@ This keeps tradeoff visibility correct across routed, local-clean, and local-ove
   - Data handling
 - Policy and approval copy is human-readable; raw backend enum strings are intentionally hidden in primary UX surfaces.
 
+### 3.12 Federated authentication (frontend gate)
+- Frontend uses Auth.js (JWT strategy) with middleware route protection.
+- Supported providers:
+  - Google
+  - GitHub (optional, env-gated)
+- Dashboard is protected; unauthenticated users are redirected to `/login`.
+- Approver identity for governance actions is derived from authenticated session email (read-only in UI), then submitted as `manager_id`.
+
 ## 4. UX Behavior and What Inputs Mean
 
 ### Primary Grid Zone
@@ -402,6 +410,29 @@ Recommended Azure tuning profile (reduce long-tail latency):
 ### 10.2 Frontend env (`frontend/.env.local`)
 - `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000/api/v1`)
 - `NEXT_PUBLIC_PRIMARY_ZONES` (CSV for dropdown options)
+- `NEXTAUTH_URL` (for local dev: `http://localhost:3000`; in production use deployed frontend URL)
+- `NEXTAUTH_SECRET` (random secret for JWT/session encryption)
+- `GOOGLE_CLIENT_ID`
+- `GOOGLE_CLIENT_SECRET`
+- `GITHUB_CLIENT_ID` (optional; required only when enabling GitHub sign-in)
+- `GITHUB_CLIENT_SECRET` (optional; required only when enabling GitHub sign-in)
+
+### 10.3 OAuth callback configuration
+Google OAuth app:
+- Authorized origins:
+  - `http://localhost:3000`
+  - `https://carbon-aware-advisor.vercel.app`
+- Redirect URIs:
+  - `http://localhost:3000/api/auth/callback/google`
+  - `https://carbon-aware-advisor.vercel.app/api/auth/callback/google`
+
+GitHub OAuth app:
+- Homepage URL:
+  - `http://localhost:3000` (local app during development)
+  - `https://carbon-aware-advisor.vercel.app` (production app)
+- Authorization callback URL:
+  - `http://localhost:3000/api/auth/callback/github`
+  - `https://carbon-aware-advisor.vercel.app/api/auth/callback/github`
 
 ## 11. Local Development and Runbook
 
@@ -444,6 +475,8 @@ npm run dev
 
 ### 11.3 Open UI
 - [http://localhost:3000](http://localhost:3000)
+- If not authenticated, frontend redirects to `/login`.
+- Sign in with configured provider (Google, and optionally GitHub if env is set).
 
 ### 11.4 Azure + Vercel Deployment Runbook
 
@@ -659,7 +692,11 @@ Electricity Maps supports broader signals and endpoints beyond current flow (for
 Current status: no reverse geocoding provider or zone-resolution endpoint integration yet.
 
 ### 15.6 Multi-tenant auth and role model
-- Manager action flow exists, but there is no identity/authz layer (no user accounts, role-based control, or audit signatures yet).
+- Federated login is implemented (Google, optional GitHub) with JWT sessions and route protection.
+- Still deferred:
+  - role-based authorization (for example approver vs observer roles),
+  - organization/tenant boundaries,
+  - signed audit attestations and enterprise SSO (SAML/OIDC) integration.
 
 ### 15.7 Minimum routing improvement threshold
 - Current routing policy routes whenever a candidate satisfies threshold compliance.

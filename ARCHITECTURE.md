@@ -31,12 +31,23 @@ Rationale:
 - This preserves interrupt/resume context correctness in the current stack.
 - It avoids known runnable-context failures observed with direct async graph execution in this project.
 
+## 1.4 Identity and route protection (frontend)
+1. Frontend uses Auth.js with JWT sessions.
+2. Supported providers:
+   - Google
+   - GitHub (optional, enabled only when provider env vars are present).
+3. Middleware protects dashboard routes and redirects unauthenticated users to `/login`.
+4. Governance identity binding:
+   - manager actions submit authenticated session email as `manager_id`.
+   - approver name/organization fields remain client-local context only.
+
 ## 2) Known Limits in Current Design
 
 1. Global lock limits parallel decision throughput.
 2. Polling introduces repeated HTTP load and delayed UX updates.
 3. Retry/backoff is request-level only; no explicit circuit-breaker state machine yet.
 4. Emissions estimates are location-based and point-in-time.
+5. Identity model is authentication-first; role-based authorization and tenant separation are deferred.
 
 These are acceptable tradeoffs for interview demo scope and reliability.
 
