@@ -6,10 +6,9 @@ import { ResolvedTheme, ThemePreference, THEME_STORAGE_KEY, parseThemePreference
 
 export function useThemePreference() {
   const [themePreference, setThemePreference] = useState<ThemePreference>("system");
-  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>(() => {
-    if (typeof document === "undefined") return "light";
-    return document.documentElement.classList.contains("dark") ? "dark" : "light";
-  });
+  // Keep initial value deterministic across SSR and first client render.
+  // Actual theme is synchronized in effects right after hydration.
+  const [resolvedTheme, setResolvedTheme] = useState<ResolvedTheme>("light");
 
   useEffect(() => {
     if (typeof window === "undefined") return;
