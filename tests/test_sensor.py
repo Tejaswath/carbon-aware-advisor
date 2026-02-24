@@ -217,3 +217,22 @@ def test_sequential_call_count_equals_capped_candidates(monkeypatch):
     result = sensor.get_latest_for_zones()
     assert len(result) == 3
     assert calls["count"] == 3
+
+
+def test_sensor_health_snapshot_defaults_to_unreachable():
+    snapshot = sensor.get_sensor_health_snapshot()
+    assert snapshot["sensor_reachable"] is False
+    assert snapshot["last_sensor_success_at"] is None
+
+
+def test_sensor_health_snapshot_updates_on_success(monkeypatch):
+    def fake_get(url, headers, timeout):
+        return DummyResponse(200, {"carbonIntensity": 41, "datetime": "2026-02-20T01:00:00Z"})
+
+    monkeypatch.setattr(sensor.requests, "get", fake_get)
+    monkeypatch.setattr(sensor.settings, "electricitymaps_key", "test-key")
+    sensor.get_carbon_intensity_latest("SE3", cache_ttl_seconds=0)
+
+    snapshot = sensor.get_sensor_health_snapshot(stale_after_seconds=999999)
+    assert snapshot["sensor_reachable"] is True
+    assert snapshot["last_sensor_success_at"] is not None

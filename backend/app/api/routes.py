@@ -13,6 +13,7 @@ from backend.app.services.workflow_service import (
     WorkflowService,
 )
 from src.config import settings
+from src.sensor import get_sensor_health_snapshot
 
 
 router = APIRouter(prefix="/api/v1", tags=["decisions"])
@@ -126,4 +127,11 @@ async def health(request: Request) -> HealthResponse:
     langgraph_db_path = getattr(request.app.state, "langgraph_db_path", settings.langgraph_db_path)
     if storage_mode == "postgres":
         langgraph_db_path = None
-    return HealthResponse(status="ok", storage_mode=storage_mode, langgraph_db_path=langgraph_db_path)
+    sensor_health = get_sensor_health_snapshot()
+    return HealthResponse(
+        status="ok",
+        storage_mode=storage_mode,
+        langgraph_db_path=langgraph_db_path,
+        sensor_reachable=sensor_health["sensor_reachable"],
+        last_sensor_success_at=sensor_health["last_sensor_success_at"],
+    )

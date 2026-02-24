@@ -53,8 +53,11 @@ def test_dirty_routeable_flow_can_route(monkeypatch):
         pass
 
     interrupted = graph.get_state(config)
+    interrupted_state = interrupted.values
     assert agent.extract_interrupt_question(interrupted) is not None
     assert agent.extract_interrupt_options(interrupted) == ["run_local", "route", "postpone"]
+    assert interrupted_state["estimated_kgco2_local"] is not None
+    assert interrupted_state["estimated_kgco2_routed"] is not None
 
     for _ in graph.stream(Command(resume="route"), config):
         pass
@@ -160,7 +163,10 @@ def test_dirty_no_route_flow_supports_postpone(monkeypatch):
         pass
 
     interrupted = graph.get_state(config)
+    interrupted_state = interrupted.values
     assert agent.extract_interrupt_options(interrupted) == ["run_local", "postpone"]
+    assert interrupted_state["estimated_kgco2_local"] is not None
+    assert interrupted_state["estimated_kgco2_routed"] is None
 
     for _ in graph.stream(Command(resume="postpone"), config):
         pass

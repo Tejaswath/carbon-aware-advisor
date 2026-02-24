@@ -20,10 +20,10 @@ def _template_report(payload: Mapping[str, Any]) -> str:
     )
 
 
-def _llm_report(payload: Mapping[str, Any], model: str, api_key: str) -> str:
+def _llm_report(payload: Mapping[str, Any], model: str, api_key: str, timeout_seconds: float) -> str:
     from langchain_openai import ChatOpenAI
 
-    llm = ChatOpenAI(model=model, temperature=0, api_key=api_key)
+    llm = ChatOpenAI(model=model, temperature=0, api_key=api_key, timeout=timeout_seconds)
     prompt = (
         "You are an ESG audit assistant. Write a concise 2-3 sentence operational audit log. "
         f"Primary Zone: {payload.get('primary_zone')}\n"
@@ -54,12 +54,13 @@ def _llm_report(payload: Mapping[str, Any], model: str, api_key: str) -> str:
 def generate_audit_report(payload: Mapping[str, Any], *, model: str | None = None, openai_api_key: str | None = None) -> dict[str, str]:
     api_key = openai_api_key if openai_api_key is not None else settings.openai_api_key
     selected_model = model or settings.openai_model
+    timeout_seconds = settings.llm_audit_timeout_seconds
 
     if not api_key:
         return {"report_text": _template_report(payload), "report_mode": "template"}
 
     try:
-        report = _llm_report(payload, selected_model, api_key)
+        report = _llm_report(payload, selected_model, api_key, timeout_seconds)
         if not report:
             raise ValueError("Empty LLM report")
         return {"report_text": report, "report_mode": "llm"}

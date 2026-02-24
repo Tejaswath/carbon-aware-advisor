@@ -3,10 +3,27 @@
 @tailwind utilities;
 
 :root {
-  --bg-main: radial-gradient(circle at 15% 10%, #f8f2e2 0%, #e6f0e8 35%, #d5e8db 70%, #d0e2d6 100%);
+  --color-ink: 19 42 29;
+  --color-fern: 52 84 73;
+  --color-moss: 122 158 126;
+  --color-sand: 246 242 234;
+  --color-ember: 216 111 69;
+  --bg-main: radial-gradient(circle at 15% 10%, #f6f3eb 0%, #e9efe9 35%, #dbe7df 70%, #d3e1d9 100%);
   --panel: rgba(255, 255, 255, 0.88);
   --panel-strong: rgba(255, 255, 255, 0.97);
   --border: rgba(47, 93, 80, 0.18);
+}
+
+.dark {
+  --color-ink: 237 237 237;
+  --color-fern: 161 161 170;
+  --color-moss: 113 113 122;
+  --color-sand: 10 10 10;
+  --color-ember: 251 146 60;
+  --bg-main: radial-gradient(circle at 20% 5%, #0a0a0a 0%, #111111 40%, #151515 70%, #191919 100%);
+  --panel: rgba(24, 24, 27, 0.9);
+  --panel-strong: rgba(32, 32, 36, 0.95);
+  --border: rgba(82, 82, 91, 0.55);
 }
 
 * {
@@ -17,7 +34,7 @@ body {
   margin: 0;
   min-height: 100vh;
   background: var(--bg-main);
-  color: #132a1d;
+  color: rgb(var(--color-ink));
   font-family: "Space Grotesk", "IBM Plex Sans", "Segoe UI", sans-serif;
 }
 
@@ -36,4 +53,22 @@ main {
   background: var(--panel-strong);
   border: 1px solid var(--border);
   box-shadow: 0 20px 40px -24px rgba(19, 42, 29, 0.35);
+}
+
+.dark .glass-panel,
+.dark .panel-strong {
+  box-shadow: 0 24px 40px -24px rgba(0, 0, 0, 0.65);
+}
+
+.dark input,
+.dark select,
+.dark textarea {
+  background: rgba(24, 24, 27, 0.95) !important;
+  color: rgb(var(--color-ink)) !important;
+  border-color: rgba(82, 82, 91, 0.75) !important;
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: rgba(161, 161, 170, 0.85);
 }

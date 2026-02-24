@@ -375,11 +375,13 @@ def apply_policy(state: AgentState) -> dict[str, Any]:
                 {"options": ["run_local", "postpone"]},
             )
         )
+    precomputed_metrics = compute_metrics(state)
     return {
         "policy_label": decision["label"],
         "policy_action": decision["action"],
         "policy_reason": decision["reason"],
         "timeline": timeline,
+        **precomputed_metrics,
     }
 
 
