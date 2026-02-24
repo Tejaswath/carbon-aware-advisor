@@ -1,442 +1,288 @@
 # Carbon-Aware Compute Advisor
 
-Real-time GreenOps orchestration demo for flexible compute workloads.
+Carbon-Aware Compute Advisor is an interview-focused GreenOps orchestration app.
 
-This project decides whether a workload should:
+It evaluates a compute workload against real-time grid carbon intensity and decides whether to:
 - run locally now,
-- be routed to a cleaner region now, or
-- be postponed,
+- route to a cleaner zone, or
+- pause for manager approval.
 
-using Electricity Maps carbon-intensity data, explicit policy rules, human approval gates, and auditable outputs.
+The system is designed to demonstrate production-style workflow orchestration: policy evaluation, human-in-the-loop controls, resumable execution, and auditable artifacts.
 
 ## Table of Contents
-- [1. Project Snapshot](#1-project-snapshot)
-- [2. What This Project Demonstrates](#2-what-this-project-demonstrates)
-- [3. Current Feature Set (Implemented and Active)](#3-current-feature-set-implemented-and-active)
-- [4. UX Behavior and What Inputs Mean](#4-ux-behavior-and-what-inputs-mean)
-- [5. End-to-End Decision Lifecycle](#5-end-to-end-decision-lifecycle)
-- [6. System Architecture](#6-system-architecture)
-- [6.1 Production Scaling Narrative](#61-production-scaling-narrative)
-- [7. Policy Logic](#7-policy-logic)
-- [7.1 Data Sovereignty Considerations](#71-data-sovereignty-considerations)
-- [8. LangGraph Interrupt/Resume Design](#8-langgraph-interruptresume-design)
-- [9. API Reference (Routing-First Contract)](#9-api-reference-routing-first-contract)
-- [10. Environment Variables](#10-environment-variables)
-- [11. Local Development and Runbook](#11-local-development-and-runbook)
-- [11.4 Azure + Vercel Deployment Runbook](#114-azure--vercel-deployment-runbook)
-- [12. Testing](#12-testing)
-- [13. Demo Playbook (Interview-Ready)](#13-demo-playbook-interview-ready)
-- [14. Operational Notes](#14-operational-notes)
-- [15. Implemented but Not Yet Integrated (Future Work)](#15-implemented-but-not-yet-integrated-future-work)
-- [16. Known Constraints](#16-known-constraints)
+- [1) What This Application Is](#1-what-this-application-is)
+- [2) What It Demonstrates](#2-what-it-demonstrates)
+- [3) End-to-End User Flow](#3-end-to-end-user-flow)
+- [4) Architecture](#4-architecture)
+- [5) Backend Workflow Design](#5-backend-workflow-design)
+- [6) Frontend and Auth](#6-frontend-and-auth)
+- [7) Data and Persistence](#7-data-and-persistence)
+- [8) API Contract](#8-api-contract)
+- [9) Environment Variables](#9-environment-variables)
+- [10) Local Development](#10-local-development)
+- [11) Deployment Topology](#11-deployment-topology)
+- [12) Verification and Testing](#12-verification-and-testing)
+- [13) Performance and Latency Controls](#13-performance-and-latency-controls)
+- [14) Known Constraints](#14-known-constraints)
+- [15) Roadmap (Deferred)](#15-roadmap-deferred)
+- [16) Interview Brief (2-3 Minutes)](#16-interview-brief-2-3-minutes)
+- [17) Repository Map](#17-repository-map)
 
-## 1. Project Snapshot
-- **Primary stack**: Python + FastAPI + LangGraph + Next.js.
-- **Decision style**: Routing-first (forecast-independent).
-- **Primary data signal used in active flow**: `GET /v3/carbon-intensity/latest`.
-- **Human governance**: Mandatory manager actions in dirty-grid cases.
-- **Auditability**: Decision replay timeline + downloadable CSV audit.
-- **Scope intent**: non-commercial academic/resume-quality system design demo.
+## 1) What This Application Is
+This project is a decision-control surface for carbon-aware compute operations.
 
-## 2. What This Project Demonstrates
-Most carbon-aware demos stop at dashboards. This one demonstrates production-style control flow:
-- deterministic policy evaluation,
-- human override and governance,
-- resumable workflow state,
-- reliability guardrails (retry/backoff/cache/candidate cap),
-- clear audit artifacts for compliance-minded environments.
+Given:
+- estimated job energy (`kWh`),
+- a carbon threshold (`gCO2eq/kWh`),
+- and a primary grid zone,
 
-This maps well to enterprise contexts where energy/carbon decisions must be explainable, reviewable, and reversible.
+the system evaluates current intensity and candidate zones, then produces a governed action:
+- `run_now_local`
+- `route_to_clean_region`
+- `require_manager_decision`
 
-## 3. Current Feature Set (Implemented and Active)
-
-### 3.1 Routing-first workload decisioning
-- Evaluates the primary zone and candidate zones using latest carbon intensity.
-- Chooses between:
-  - `run_now_local`
-  - `route_to_clean_region`
-  - `require_manager_decision`
-
-### 3.2 Spatial candidate evaluation with guardrails
-- Candidate list sourced from `ROUTING_CANDIDATE_ZONES`.
-- Hard cap with `MAX_ROUTING_CANDIDATES`.
-- Sequential fetching by default for quota safety.
-- Optional parallel mode exists (`CANDIDATE_FETCH_MODE=parallel`).
-- Per-candidate soft failure handling (including `429`) without hard-crashing the whole decision.
-
-### 3.3 Human-in-the-loop manager controls
-When the workflow requires approval, manager actions are explicit:
+For dirty-grid cases, the workflow pauses and requires explicit manager action:
 - `run_local`
 - `route`
 - `postpone`
 
-Governance inputs captured on each manager action:
-- `manager_id` (required)
-- `override_reason` (required when overriding recommended `route` action in routeable dirty cases)
+The final output includes:
+- policy reasoning,
+- emissions estimates,
+- decision timeline,
+- and CSV export for audit review.
 
-### 3.4 Emissions metrics
-Computed and returned for each decision:
-- `estimated_kgco2_local`
-- `estimated_kgco2_routed`
-- `estimated_kgco2_saved_by_routing`
-- `accounting_method` (currently `location-based`)
+## 2) What It Demonstrates
+This app is intentionally built to show engineering depth beyond a static dashboard:
 
-### 3.5 Audit and replay
-- Generated operational audit text (`llm` or `template` fallback).
-- Frontend cleans common markdown artifacts from LLM audit output for readable rendering.
-- Decision replay timeline with stage-by-stage events.
-- CSV export endpoint for decision-level audit records.
-- Audit artifacts include `manager_id` and `override_reason` when applicable.
-- Optional postpone-time forecast guidance is captured when feature flag is enabled.
+1. Workflow orchestration with interrupt/resume (LangGraph).
+2. Async API service with persistent checkpoints (SQLite or Postgres).
+3. Human governance controls with override justification rules.
+4. Federated login gate on frontend (Google, optional GitHub).
+5. Structured operational outputs (timeline + CSV).
 
-### 3.6 Frontend controls for demonstration reliability
-- Live evaluation button (`Evaluate and decide (Live)`).
-- Deterministic scenario buttons:
-  - `Demo: Grid Clean`
-  - `Demo: Route Available`
-  - `Demo: Needs Approval`
+## 3) End-to-End User Flow
+1. User signs in at `/login` (Google by default, GitHub optional if env vars are set).
+2. User configures energy, threshold, and primary zone.
+3. User runs either:
+   - `Evaluate and decide (Live)` (real Electricity Maps signal), or
+   - one deterministic demo scenario.
+4. Backend starts a decision thread and executes the graph.
+5. If approval is required, UI shows decision briefing + action buttons.
+6. Manager action resumes the same checkpointed thread.
+7. Final state renders metrics, policy summary, audit report, tradeoff table, candidate zones, and replay timeline.
+8. User can download `audit.csv`.
 
-### 3.7 Primary-zone UX improvements
-- Dropdown-based zone selection.
-- Human-friendly zone labels.
-- Optional geolocation-assisted zone suggestion.
-- Browser-local persistence of last selected primary zone.
-- Threshold policy presets (`Strict`, `Moderate`, `Relaxed`) with custom override.
-
-### 3.8 Operational tradeoff visualization
-- Decision view includes an `Execution Tradeoff Comparison` table.
-- Compares `Run Local`, `Route`, and `Postpone` across:
-  - estimated carbon (`kgCO2`)
-  - estimated latency impact
-  - data residency posture (same-country vs cross-border)
-  - estimated cost impact
-
-Route row zone resolution is intentionally:
-1. use `selected_execution_zone` when it exists and differs from `primary_zone`,
-2. else use the first valid non-primary candidate from `routing_top3`,
-3. else show `Not available`.
-
-This keeps tradeoff visibility correct across routed, local-clean, and local-override outcomes.
-
-### 3.9 Outcome-aware savings card
-- The summary savings card is state-aware:
-  - `Routing Savings` (green) when savings are realized (`execution_mode=routed` and savings > 0).
-- `Foregone Savings` (amber) when route savings existed but local execution was chosen (`execution_mode=local` and savings > 0).
-- Neutral style for zero/unknown savings.
-
-### 3.10 Theme support
-- UI supports light and dark themes with a header toggle.
-- First visit follows system preference; explicit user choice is persisted in browser localStorage.
-- Dark mode uses neutral charcoal surfaces with high-contrast text and green as an accent color (not a background tint).
-- Primary CTA, modal overlays, status badges, stepper, and table surfaces are contrast-tuned for both themes.
-
-### 3.11 Decision UX and onboarding upgrades
-- Live and demo controls are state-aware:
-  - Live action remains primary.
-  - Demo scenarios are grouped under a collapsible section.
-  - Approval actions render in a dedicated manager decision card.
-- Approval state includes a compact `Decision Briefing` block with local vs routed estimates and savings before action buttons.
-- Help modal is task-focused and structured as:
-  - What this solves
-  - How to run a decision
-  - How approval works
-  - Understanding results
-  - Data handling
-- Policy and approval copy is human-readable; raw backend enum strings are intentionally hidden in primary UX surfaces.
-
-### 3.12 Federated authentication (frontend gate)
-- Frontend uses Auth.js (JWT strategy) with middleware route protection.
-- Supported providers:
-  - Google
-  - GitHub (optional, env-gated)
-- Dashboard is protected; unauthenticated users are redirected to `/login`.
-- Approver identity for governance actions is derived from authenticated session email (read-only in UI), then submitted as `manager_id`.
-
-## 4. UX Behavior and What Inputs Mean
-
-### Primary Grid Zone
-This is **not auto-selected by policy**. It represents the job’s origin/default execution region.
-
-The router then decides whether to:
-- keep execution local,
-- route to cleaner region,
-- or request manager action.
-
-### Carbon Threshold
-Policy boundary used to classify grid state as acceptable or not for immediate local execution.
-
-### Estimated Job Energy (kWh)
-Used only for emissions math and savings calculations.
-
-### Numeric input normalization
-- `Estimated Job Energy` and `Carbon Threshold` are string-backed in the UI to avoid React no-op re-render issues.
-- Only digits are accepted while typing.
-- On blur, values are normalized to canonical positive integers (minimum `1`), so entries like `01500` become `1500`.
-
-### Force Demo Buttons
-These use synthetic intensities in backend workflow state to guarantee a predictable path for demos. They are intentionally deterministic.
-
-### Postpone guidance placement
-- Postpone forecast guidance is rendered in the `Execution Tradeoff Comparison` section.
-- If no recommendation is available, UI explicitly shows: `No forecast guidance available — check back manually.`
-
-### Approver fields and data handling
-- `Approver Email` is the governance field and is stored in backend audit artifacts when manager actions are submitted.
-- `Approver Name` and `Organization` are local-only context fields for demo readability and are not sent to backend APIs.
-
-## 5. End-to-End Decision Lifecycle
-1. Client starts decision with `{zone, threshold, estimated_kwh, optional demo_scenario}`.
-2. Backend creates a decision thread and starts LangGraph.
-3. Workflow gets primary intensity (live or synthetic for demo mode).
-4. Workflow evaluates candidate zones.
-5. Policy chooses action.
-6. If manager input is needed, workflow interrupts and waits.
-7. Action endpoint resumes same thread with `Command(resume=...)`.
-8. Execution mode resolves (`local`, `routed`, `postponed`).
-9. Metrics + audit + timeline finalize.
-10. UI and CSV endpoint expose final artifacts.
-
-## 6. System Architecture
+## 4) Architecture
 
 ```mermaid
 flowchart LR
-  UI["Next.js Dashboard"] --> API["FastAPI /api/v1"]
-  API --> WF["WorkflowService"]
-  WF --> LG["LangGraph State Graph"]
-  LG --> SENSOR["Sensor Layer (Electricity Maps latest)"]
-  LG --> POLICY["Policy Engine"]
-  LG --> AUDIT["Auditor (LLM or template)"]
-  LG --> CP["Checkpoint Store (Async SQLite or Async Postgres)"]
-  API --> CSV["Audit CSV Export"]
+  U[Next.js Frontend on Vercel] --> A[FastAPI Backend on Azure App Service]
+  A --> W[WorkflowService]
+  W --> G[LangGraph State Graph]
+  G --> S[Sensor Layer Electricity Maps]
+  G --> P[Policy Engine]
+  G --> R[Audit Generator LLM or Template]
+  G --> C[Checkpoint Store Async SQLite or Async Postgres]
+  A --> H[/api/v1/health]
+  A --> X[/decisions/* and audit.csv]
 ```
 
-### Key directories
-- `src/`
-  - `agent.py`: workflow graph and state transitions.
-  - `sensor.py`: API fetch/caching/retry/fanout.
-  - `policy.py`: decision rule engine.
-  - `auditor.py`: report generation and fallback.
-  - `config.py`: env parsing.
-- `backend/`
-  - FastAPI entrypoint, API routes, workflow service, checkpointer init.
-- `frontend/`
-  - Next.js app UI, typed API client, decision rendering.
-- `tests/`
-  - Backend, policy, sensor, workflow, and API behavior tests.
+Runtime topology in production:
+- Frontend: Vercel (`/login`, `/`, `/api/auth/*`)
+- Backend: Azure App Service (container)
+- Database: Azure PostgreSQL Flexible Server (checkpoint persistence)
+- Registry/CI-CD: Azure Container Registry + GitHub Actions
 
-## 6.1 Production Scaling Narrative
-For interview discussion on scale and reliability tradeoffs, see:
+## 5) Backend Workflow Design
 
-- `/Users/tejaswath/projects/carbon_advisor/ARCHITECTURE.md`
+### 5.1 Core backend components
+- `src/agent.py`
+  - graph definition, stage transitions, interrupt points.
+- `backend/app/services/workflow_service.py`
+  - decision lifecycle orchestration, thread resume, CSV export.
+- `src/sensor.py`
+  - latest intensity fetch, retries, cache, candidate fanout, health telemetry.
+- `src/policy.py`
+  - deterministic routing-first rule evaluation.
+- `src/auditor.py`
+  - LLM audit generation with timeout and template fallback.
+- `backend/app/services/checkpointer.py`
+  - initializes `AsyncSqliteSaver` or `AsyncPostgresSaver`.
 
-## 7. Policy Logic
-Given `current_intensity`, `threshold`, and best candidate (if any):
+### 5.2 Concurrency model
+- API handlers are async.
+- LangGraph execution is currently run via sync graph calls wrapped in `asyncio.to_thread(...)`.
+- A single service-level `asyncio.Lock()` serializes graph state operations.
 
-- If `current_intensity <= threshold`:
-  - label: `clean`
-  - action: `run_now_local`
-- Else if a candidate exists with intensity <= threshold:
-  - label: `dirty`
-  - action: `route_to_clean_region`
-- Else:
-  - label: `dirty`
-  - action: `require_manager_decision`
+This is intentionally conservative for correctness and deterministic behavior in demo scope.
 
-In routeable dirty cases, manager still decides final action.
+### 5.3 Manager governance rules
+- `manager_id` is required on manager actions.
+- `override_reason` is required when manager overrides a route recommendation in routeable dirty cases.
+- Workflow status transitions are guarded to prevent invalid actions.
 
-## 7.1 Data Sovereignty Considerations
-In production, routing candidates should be dynamically scoped by workload data classification, legal entity, and residency constraints (for example, `Sweden-only` for restricted datasets vs `Nordics-allowed` for internal analytics). This demo uses a static `ROUTING_CANDIDATE_ZONES` list for simplicity, but the intended enterprise pattern is policy-driven candidate filtering before any routing recommendation is computed.
+### 5.4 Health semantics
+`GET /api/v1/health` includes:
+- `status`
+- `storage_mode` (`sqlite` or `postgres`)
+- `langgraph_db_path` (only populated in sqlite mode)
+- `sensor_reachable`
+- `last_sensor_success_at`
 
-## 8. LangGraph Interrupt/Resume Design
+## 6) Frontend and Auth
 
-The workflow explicitly pauses at manager decision nodes via `interrupt(...)`.
+### 6.1 Stack and route model
+- Next.js App Router (`frontend/app/*`)
+- Protected dashboard route: `/`
+- Login route: `/login`
+- Auth.js endpoints: `/api/auth/*`
 
-Resume mapping:
-- `POST /run-local` -> `Command(resume={"decision":"run_local","manager_id":"...","override_reason":"..."})`
-- `POST /route` -> `Command(resume={"decision":"route","manager_id":"...","override_reason":"..."})`
-- `POST /postpone` -> `Command(resume={"decision":"postpone","manager_id":"...","override_reason":"..."})`
+### 6.2 Auth strategy
+- Auth.js JWT session strategy (no Prisma adapter tables in current phase).
+- Providers:
+  - Google (enabled when `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` exist)
+  - GitHub (enabled when `GITHUB_CLIENT_ID` + `GITHUB_CLIENT_SECRET` exist)
+- Middleware gate redirects unauthenticated users to `/login`.
 
-This preserves deterministic continuity on the same decision thread, with checkpointed state.
+### 6.3 Governance identity binding
+- Approver email shown in dashboard is sourced from authenticated session.
+- On manager actions, frontend submits `manager_id = session.user.email`.
+- Local context fields (`Approver Name`, `Organization`) are browser-local and never sent to backend APIs.
 
-## 9. API Reference (Routing-First Contract)
+### 6.4 Theme behavior
+- Dark/light preference is pre-hydrated with a blocking script in `frontend/app/layout.tsx`.
+- This prevents first-paint theme flicker.
+- User preference is persisted in localStorage key `carbon_advisor.theme`.
 
-Base: `http://localhost:8000/api/v1`
+## 7) Data and Persistence
 
-### 9.1 Start decision
+### 7.1 Stored in backend decision state
+- Decision status and policy outputs
+- Emissions estimates
+- Candidate zone evaluations
+- Manager action details (`manager_id`, `override_reason`)
+- Timeline events
+- Audit text and mode (`llm` or `template`)
+
+### 7.2 Stored only in browser localStorage
+- UI preference and helper context:
+  - `carbon_advisor.theme`
+  - `carbon_advisor.primary_zone`
+  - `carbon_advisor.approver_name`
+  - `carbon_advisor.approver_org`
+  - `carbon_advisor.intro_seen`
+
+## 8) API Contract
+Base URL (local): `http://localhost:8000/api/v1`
+
+### 8.1 Start decision
 `POST /decisions/start`
 
-Request:
+Request example:
 ```json
 {
-  "estimated_kwh": 550,
+  "estimated_kwh": 500,
   "threshold": 40,
   "zone": "SE-SE3",
   "demo_scenario": "routeable_dirty"
 }
 ```
 
-`demo_scenario` is optional and can be:
+`demo_scenario` values:
 - `clean_local`
 - `routeable_dirty`
 - `non_routeable_dirty`
 
-### 9.2 Poll decision
+### 8.2 Poll decision
 `GET /decisions/{decision_id}`
 
-Returns:
-- status (`processing`, `awaiting_approval`, `completed`, `postponed`, `error`)
-- primary/selected zone info
+Returns status and full decision payload including:
 - policy action/reason
-- emissions metrics
-- accounting method label (`location-based`)
-- manager options/prompt (if awaiting approval)
-- manager identity fields (`manager_id`, `override_reason`) once action is submitted
-- optional postpone forecast guidance (`forecast_available`, `forecast_recommendation`) when enabled
-- routing top3
+- emissions values
+- approval prompt/options
 - timeline
-- audit text/mode
+- audit text
+- candidate zones
 
-### 9.3 Manager actions
+### 8.3 Manager actions
 - `POST /decisions/{decision_id}/run-local`
 - `POST /decisions/{decision_id}/route`
 - `POST /decisions/{decision_id}/postpone`
 
-Request body for all manager action endpoints:
+Request body:
 ```json
 {
-  "manager_id": "manager@example.com",
-  "override_reason": "Required only when overriding route recommendation"
+  "manager_id": "approver@example.com",
+  "override_reason": "Only required when overriding route recommendation"
 }
 ```
 
-### 9.4 CSV export
+### 8.4 CSV export
 `GET /decisions/{decision_id}/audit.csv`
 
-Current CSV columns:
-- `decision_id`
-- `status`
-- `primary_zone`
-- `primary_intensity`
-- `selected_execution_zone`
-- `selected_execution_intensity`
-- `execution_mode`
-- `threshold`
-- `estimated_kwh`
-- `estimated_kgco2_local`
-- `estimated_kgco2_routed`
-- `estimated_kgco2_saved_by_routing`
-- `accounting_method`
-- `policy_action`
-- `policy_reason`
-- `manager_decision`
-- `manager_id`
-- `override_reason`
-- `forecast_recommendation`
-- `audit_mode`
-- `audit_report`
-- `created_at_utc`
-- `completed_at_utc`
+Returns a decision-level audit row with core governance and emissions fields.
 
-### 9.5 Health
-`GET /health`
+### 8.5 Health
+`GET /health` (under `/api/v1` prefix => `/api/v1/health`)
 
-Example (sqlite mode):
-```json
-{
-  "status": "ok",
-  "storage_mode": "sqlite",
-  "langgraph_db_path": "./langgraph_checkpoints.db",
-  "sensor_reachable": false,
-  "last_sensor_success_at": null
-}
-```
+## 9) Environment Variables
+Use:
+- `/Users/tejaswath/projects/carbon_advisor/.env.example`
+- `/Users/tejaswath/projects/carbon_advisor/frontend/.env.example`
 
-Example (postgres mode):
-```json
-{
-  "status": "ok",
-  "storage_mode": "postgres",
-  "langgraph_db_path": null,
-  "sensor_reachable": true,
-  "last_sensor_success_at": "2026-02-23T16:22:24.358257+00:00"
-}
-```
-
-## 10. Environment Variables
-Use `/Users/tejaswath/projects/carbon_advisor/.env.example` and `/Users/tejaswath/projects/carbon_advisor/frontend/.env.example`.
-
-### 10.1 Backend env (`.env`)
-
+### 9.1 Backend (`.env`)
 Required:
 - `ELECTRICITYMAPS_KEY`
 
-Optional but supported:
+Optional and common:
 - `OPENAI_API_KEY`
 - `OPENAI_MODEL` (default `gpt-4o-mini`)
+- `DATABASE_URL` (when set, postgres mode)
+- `LANGGRAPH_DB_PATH` (sqlite fallback path)
+- `CORS_ORIGINS`
 
-Routing/runtime controls:
-- `CORS_ORIGINS` (CSV, default `http://localhost:3000`; trailing `/` is stripped during config load to avoid CORS exact-match issues)
-- `GRID_ZONE` (default `SE-SE3`)
-- `CARBON_THRESHOLD` (default `40`)
+Runtime controls:
+- `REQUEST_TIMEOUT_SECONDS`
+- `RETRY_MAX_ATTEMPTS`
+- `CACHE_TTL_SECONDS`
 - `ROUTING_CANDIDATE_ZONES`
-- `MAX_ROUTING_CANDIDATES` (default `6`)
-- `CANDIDATE_FETCH_MODE` (`sequential` or `parallel`, default `sequential`)
-- `PARALLEL_FETCH_WORKERS` (default `3`)
-- `ENABLE_POSTPONE_FORECAST_RECOMMENDATION` (default `false`)
-- `REQUEST_TIMEOUT_SECONDS` (default `10`)
-- `CACHE_TTL_SECONDS` (default `300`)
-- `RETRY_MAX_ATTEMPTS` (default `3`)
-- `LLM_AUDIT_TIMEOUT_SECONDS` (default `5`; hard cap for LLM audit generation before template fallback)
-- `DATABASE_URL` (optional; when set, backend uses async Postgres checkpointer)
-- `LANGGRAPH_DB_PATH` (default `./langgraph_checkpoints.db`; used when `DATABASE_URL` is not set)
+- `MAX_ROUTING_CANDIDATES`
+- `CANDIDATE_FETCH_MODE`
+- `PARALLEL_FETCH_WORKERS`
+- `ENABLE_POSTPONE_FORECAST_RECOMMENDATION`
+- `LLM_AUDIT_TIMEOUT_SECONDS`
 
-Persistence precedence:
-1. If `DATABASE_URL` is set, backend uses `AsyncPostgresSaver`.
-2. If `DATABASE_URL` is empty, backend uses `AsyncSqliteSaver` on `LANGGRAPH_DB_PATH`.
-
-Database URL normalization:
-- `DATABASE_URL` values starting with `postgres://` are normalized to `postgresql://` automatically.
-
-Legacy/unused in active routing flow:
-- `FORECAST_WINDOW_HOURS` (see Future Work section)
-
-Recommended Azure tuning profile (reduce long-tail latency):
-- `CANDIDATE_FETCH_MODE=parallel`
-- `MAX_ROUTING_CANDIDATES=4`
-- `REQUEST_TIMEOUT_SECONDS=6`
-- `RETRY_MAX_ATTEMPTS=2`
-- `LLM_AUDIT_TIMEOUT_SECONDS=5`
-
-### 10.2 Frontend env (`frontend/.env.local`)
-- `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000/api/v1`)
-- `NEXT_PUBLIC_PRIMARY_ZONES` (CSV for dropdown options)
-- `NEXTAUTH_URL` (for local dev: `http://localhost:3000`; in production use deployed frontend URL)
-- `NEXTAUTH_SECRET` (random secret for JWT/session encryption)
+### 9.2 Frontend (`frontend/.env.local`)
+Required for app:
+- `NEXT_PUBLIC_API_BASE_URL`
+- `NEXT_PUBLIC_PRIMARY_ZONES`
+- `NEXTAUTH_URL`
+- `NEXTAUTH_SECRET`
 - `GOOGLE_CLIENT_ID`
 - `GOOGLE_CLIENT_SECRET`
-- `GITHUB_CLIENT_ID` (optional; required only when enabling GitHub sign-in)
-- `GITHUB_CLIENT_SECRET` (optional; required only when enabling GitHub sign-in)
 
-### 10.3 OAuth callback configuration
-Google OAuth app:
-- Authorized origins:
+Optional:
+- `GITHUB_CLIENT_ID`
+- `GITHUB_CLIENT_SECRET`
+
+### 9.3 OAuth redirect requirements
+Google OAuth:
+- Origins:
   - `http://localhost:3000`
   - `https://carbon-aware-advisor.vercel.app`
 - Redirect URIs:
   - `http://localhost:3000/api/auth/callback/google`
   - `https://carbon-aware-advisor.vercel.app/api/auth/callback/google`
 
-GitHub OAuth app:
-- Homepage URL:
-  - `http://localhost:3000` (local app during development)
-  - `https://carbon-aware-advisor.vercel.app` (production app)
-- Authorization callback URL:
+GitHub OAuth:
+- Authorization callback URIs:
   - `http://localhost:3000/api/auth/callback/github`
   - `https://carbon-aware-advisor.vercel.app/api/auth/callback/github`
 
-## 11. Local Development and Runbook
+## 10) Local Development
 
-### 11.1 Backend
+### 10.1 Backend
 ```bash
 cd /Users/tejaswath/projects/carbon_advisor
 python3 -m venv .venv
@@ -445,27 +291,18 @@ pip install -r requirements.txt
 uvicorn backend.app.main:app --reload --port 8000
 ```
 
-### 11.1a Optional local Postgres (Docker/OrbStack)
-Use this when you want checkpoint persistence on Postgres locally.
-
+### 10.2 Optional local Postgres
 ```bash
 cd /Users/tejaswath/projects/carbon_advisor
 docker compose up -d db
 ```
 
-Set in `.env`:
+Set `DATABASE_URL` in `.env` for postgres mode:
 ```env
 DATABASE_URL=postgresql://admin:password@localhost:5432/carbon_db
 ```
 
-Then restart backend and verify startup log:
-- `Checkpoint storage initialized in postgres mode (DATABASE_URL configured).`
-
-Optional API verification:
-- `curl http://localhost:8000/api/v1/health` should return `"storage_mode":"postgres"` when `DATABASE_URL` is set.
-- health payload also includes sensor telemetry (`sensor_reachable`, `last_sensor_success_at`).
-
-### 11.2 Frontend
+### 10.3 Frontend
 ```bash
 cd /Users/tejaswath/projects/carbon_advisor/frontend
 cp .env.example .env.local
@@ -473,237 +310,114 @@ npm install
 npm run dev
 ```
 
-### 11.3 Open UI
-- [http://localhost:3000](http://localhost:3000)
-- If not authenticated, frontend redirects to `/login`.
-- Sign in with configured provider (Google, and optionally GitHub if env is set).
+Open:
+- `http://localhost:3000`
 
-### 11.4 Azure + Vercel Deployment Runbook
-
-Use the dedicated step-by-step deployment guide:
-
+## 11) Deployment Topology
+Detailed deployment runbook:
 - `/Users/tejaswath/projects/carbon_advisor/deploy/azure_vercel_phase2.md`
 
-App Service environment template:
+Production setup:
+1. Backend container deploy to Azure App Service.
+2. Postgres on Azure Flexible Server.
+3. Frontend deploy on Vercel (`frontend` root directory).
+4. Set backend `CORS_ORIGINS` to exact Vercel URL (no trailing slash).
 
-- `/Users/tejaswath/projects/carbon_advisor/deploy/appservice_settings.env.example`
+## 12) Verification and Testing
 
-Post-deploy smoke check command:
+### 12.1 Automated
+```bash
+cd /Users/tejaswath/projects/carbon_advisor/frontend && npm run build
+cd /Users/tejaswath/projects/carbon_advisor && PYTHONPATH=. .venv/bin/pytest -q
+```
 
+### 12.2 Production smoke
 ```bash
 bash /Users/tejaswath/projects/carbon_advisor/scripts/smoke_prod.sh \
-  "https://<your-frontend>.vercel.app" \
-  "https://<your-backend>.azurewebsites.net/api/v1"
+  "https://<frontend>.vercel.app" \
+  "https://<backend>.azurewebsites.net/api/v1"
 ```
 
-## 12. Testing
+### 12.3 Manual high-signal checks
+1. Signed-out `/` redirects to `/login`.
+2. Google sign-in returns to `/` (no login loop).
+3. Demo clean path completes local.
+4. Demo route path reaches approval and supports route/run-local override.
+5. Demo approval path supports postpone.
+6. CSV download succeeds.
+7. `/api/v1/health` returns `storage_mode:"postgres"` in cloud.
 
-Backend/unit tests:
-```bash
-cd /Users/tejaswath/projects/carbon_advisor
-source .venv/bin/activate
-PYTHONPATH=. pytest -q
-```
+## 13) Performance and Latency Controls
 
-Frontend type/build verification:
-```bash
-cd /Users/tejaswath/projects/carbon_advisor/frontend
-npm run build
-```
+### 13.1 Why latency can spike
+- Multiple external grid calls for candidate zones.
+- Retry/backoff during transient failures.
+- LLM response variance.
+- Cloud cold starts.
 
-## 13. Demo Playbook (Interview-Ready)
+### 13.2 Controls already in place
+- `LLM_AUDIT_TIMEOUT_SECONDS` hard timeout.
+- Template fallback when LLM fails or times out.
+- Candidate count and fetch mode tuning.
 
-Recommended flow:
-1. Run `Demo: Grid Clean` and show automatic local execution.
-2. Run `Demo: Route Available` and choose `route`.
-3. Run `Demo: Needs Approval` and choose `postpone`.
-4. Expand timeline events to explain decision trace.
-5. Download CSV and show governance fields (`manager_id`, `override_reason`, action trail).
-6. Run one live decision and compare behavior versus deterministic demo mode.
+Recommended cloud profile:
+- `CANDIDATE_FETCH_MODE=parallel`
+- `MAX_ROUTING_CANDIDATES=4`
+- `REQUEST_TIMEOUT_SECONDS=6`
+- `RETRY_MAX_ATTEMPTS=2`
+- `LLM_AUDIT_TIMEOUT_SECONDS=5`
 
-Manual UX validation scenarios:
-1. Leading-zero normalization:
-   - Enter `01500` in kWh and blur; it should normalize to `1500`.
-   - Enter `030` in threshold and blur; it should normalize to `30`.
-2. Clean local where candidates exist:
-   - Trigger `Demo: Grid Clean`.
-   - Confirm `policy_action=run_now_local` and `execution_mode=local`.
-   - Confirm `routing_top3` contains valid candidates.
-   - Verify the tradeoff table `Route` row still shows a candidate zone and route latency/residency context (carbon may remain `N/A` only when routed kgCO2 is truly unavailable).
-3. Routeable dirty with route:
-   - Trigger `Demo: Route Available`, then choose `route`.
-   - Verify route row and savings card represent realized routing outcome (`Routing Savings`, green).
-4. Routeable dirty with local override:
-   - Trigger `Demo: Route Available`, then choose `run_local`.
-   - Verify route row still reflects available route context and savings card shows `Foregone Savings` (amber) when savings > 0.
-5. Non-routeable dirty with postpone:
-   - Trigger `Demo: Needs Approval`, then choose `postpone`.
-   - Verify postpone status and tradeoff-section forecast guidance/fallback messaging.
-6. Live path safety:
-   - Trigger `Evaluate and decide (Live)`.
-   - Verify no crashes and neutral savings styling for clean local outcomes without positive savings.
-7. Dark mode quality:
-   - Toggle dark mode from header.
-   - Verify primary CTA remains clearly visible in both enabled and disabled states.
-   - Verify Help modal readability and backdrop layering (no background bleed-through).
-8. Approval briefing and copy:
-   - Trigger `Demo: Route Available` until `awaiting_approval`.
-   - Confirm `Decision Briefing` shows local/routed/savings values before action buttons.
-   - Confirm no raw enum strings (for example `route_to_clean_region`, `run_local`) appear in user-facing prompt text.
-9. Audit formatting:
-   - Complete any decision with `audit_mode=llm`.
-   - Confirm audit text renders without raw markdown markers such as `**...**`.
+### 13.3 Typical response profile
+- Demo scenarios: ~1-3s
+- Live warm requests: ~4-8s
+- Live cold/slow upstream: can exceed 10s
 
-Acceptance criterion addendum:
-1. `Execution Tradeoff Comparison` must render candidate-based route context for all policy branches (`run_now_local`, `route_to_clean_region`, `require_manager_decision`) whenever a valid non-primary candidate exists.
+## 14) Known Constraints
+1. Routing logic currently uses location-based accounting only.
+2. Intensity estimates are point-in-time snapshots.
+3. Global lock in workflow service limits high-throughput concurrency.
+4. Frontend uses polling; SSE/WebSocket is deferred.
+5. Auth is identity gate only; role-based authorization is deferred.
 
-## 14. Operational Notes
+## 15) Roadmap (Deferred)
+1. Per-decision lock model to improve concurrency.
+2. SSE/WebSocket updates instead of polling.
+3. Explicit circuit-breaker states in sensor layer.
+4. Market-based Scope 2 extension.
+5. Enterprise SSO and role-based access model.
 
-- Startup validates write access for checkpoint DB directory (SQLite mode only).
-- Docker image hygiene is enforced with root-level `.dockerignore` so local secrets and large dev artifacts are not copied into image layers.
-- Legacy Gradio dependency was removed from default runtime requirements; active runtime path is FastAPI + Next.js only.
-- Checkpointer storage is async in both modes:
-  - SQLite fallback: `AsyncSqliteSaver`
-  - Postgres: `AsyncPostgresSaver` + `psycopg_pool.AsyncConnectionPool`
-- Startup logs storage mode explicitly:
-  - `Checkpoint storage initialized in postgres mode (DATABASE_URL configured).`
-  - `Checkpoint storage initialized in sqlite mode (LANGGRAPH_DB_PATH=...)`
-- CORS is configured via `CORS_ORIGINS` env var.
-- For SQLite mode, mount persistent writable storage and point `LANGGRAPH_DB_PATH` to it.
-- For multi-worker/high-throughput deployment, prefer Postgres mode.
-- Current frontend status tracking uses polling; a V2 transport can move to SSE/WebSocket push updates to reduce polling overhead and improve responsiveness.
-- `/api/v1/health` includes dependency-level sensor telemetry:
-  - `sensor_reachable`
-  - `last_sensor_success_at`
+Additional architecture detail:
+- `/Users/tejaswath/projects/carbon_advisor/ARCHITECTURE.md`
 
-### 14.1 Async Postgres migration status (current stable state)
+## 16) Interview Brief (2-3 Minutes)
+Use this sequence for presentation:
 
-What is fully implemented:
-- Async checkpointer support for both storage backends:
-  - `AsyncSqliteSaver` fallback when `DATABASE_URL` is empty.
-  - `AsyncPostgresSaver` with `psycopg_pool.AsyncConnectionPool` when `DATABASE_URL` is set.
-- `DATABASE_URL` normalization (`postgres://` -> `postgresql://`).
-- CORS origin normalization (trailing `/` stripped).
-- Startup mode logging so runtime storage backend is explicit.
-- Async FastAPI route handlers and async `WorkflowService` public methods.
+1. **Problem**
+   - "Cloud workloads can run at very different carbon intensity depending on region and time. I built a control plane that makes this decision explicit and auditable."
 
-What is intentionally hybrid (by design for stability):
-- LangGraph execution currently runs through sync graph calls (`stream` / `get_state`) wrapped via `asyncio.to_thread(...)` inside the async service layer.
-- Reason: this avoids interrupt-context runtime failures seen with direct async graph execution in current stack (`Called get_config outside of a runnable context`).
-- Net result: API layer is async-safe and non-blocking for the event loop, while graph execution is stabilized through thread offload.
+2. **How it works**
+   - "The frontend sends workload parameters to FastAPI. A LangGraph workflow evaluates current intensity plus candidate zones, then either executes, routes, or interrupts for manager approval."
 
-What is completed for Phase 1 (infra-first):
-- Runtime mode is environment-driven and working in both paths:
-  - SQLite when `DATABASE_URL` is empty
-  - Postgres when `DATABASE_URL` is set
-- Local infra assets are in place and usable:
-  - `docker-compose.yml` for local Postgres (`postgres:16-alpine`)
-  - `Dockerfile` for backend container build/run
-- Startup logging is explicit for runtime backend selection:
-  - `Checkpoint storage initialized in sqlite mode (LANGGRAPH_DB_PATH=...)`
-  - `Checkpoint storage initialized in postgres mode (DATABASE_URL configured).`
+3. **Governance**
+   - "Manager actions resume the exact same workflow thread from checkpoints. I capture manager identity and override reason, then export a CSV audit artifact."
 
-What remains outside Phase 1:
-- Managed deployment wiring (Render/Railway Postgres + backend service secrets).
-- Optional move from hybrid graph execution (`to_thread` around `stream/get_state`) to fully native async graph execution once interrupt-context behavior is stable in stack versions.
+4. **Reliability and deployment**
+   - "It runs on Azure App Service with Postgres checkpoints and Vercel frontend. Health includes storage mode plus sensor reachability."
 
-How to confirm current mode quickly:
-- `GET /api/v1/health` reports the runtime backend directly:
-  - `"storage_mode":"sqlite"` + non-null `langgraph_db_path`
-  - `"storage_mode":"postgres"` + `langgraph_db_path: null`
-- Start backend and read startup logs:
-  - `Checkpoint storage initialized in sqlite mode ...` => `DATABASE_URL` is not set (or empty).
-  - `Checkpoint storage initialized in postgres mode ...` => Postgres path is active.
-- Use startup logs as a secondary confirmation during deployment debugging.
+5. **Scale narrative**
+   - "Today it uses a conservative lock and polling. Next evolution is per-decision locking and SSE; those paths are documented in `ARCHITECTURE.md`."
 
-### 14.2 Phase 1 completion checklist
-
-Phase 1 is considered complete when all checks pass:
-1. Backend starts without checkpointer errors.
-2. Startup log shows desired mode:
-   - sqlite mode when `DATABASE_URL` is empty, or
-   - postgres mode when `DATABASE_URL` is set.
-3. `GET /api/v1/health` returns `{"status":"ok", ...}`.
-   - sqlite mode -> includes sqlite path
-   - postgres mode -> returns `storage_mode:"postgres"` and null sqlite path
-4. Decision flow works end-to-end (`start` -> `poll` -> manager action where needed).
-5. Backend tests pass (`37 passed`) and frontend production build passes.
-
-Common troubleshooting:
-- If UI shows `Failed to fetch`, first verify backend is running and reachable at `NEXT_PUBLIC_API_BASE_URL`.
-- If start works but polling fails, check backend logs for checkpointer mode and initialization errors.
-- Ensure `CORS_ORIGINS` uses origins without trailing slash (normalization now helps, but explicit clean values are still recommended).
-- If you see `Called get_config outside of a runnable context`, update to the latest backend revision and restart Uvicorn; manager-interrupt nodes must run through the sync LangGraph execution path (`stream/get_state`) wrapped in `asyncio.to_thread(...)` inside the async service layer.
-
-### 14.3 Latency controls and expectations
-
-Why live requests can feel slow:
-- Candidate zone fan-out can require several external API calls.
-- Retries/backoff are intentionally enabled for transient dependency failures.
-- LLM audit generation can add tail latency when model response time spikes.
-- Cloud cold starts (especially lower-cost tiers) can add startup delay.
-
-Safe latency controls implemented:
-- `LLM_AUDIT_TIMEOUT_SECONDS` hard-caps LLM audit generation.
-- On LLM timeout/error, audit generation falls back to template mode automatically.
-- No lock/threading model changes are required for these latency controls.
-
-Typical observed ranges (with tuned Azure profile):
-- Demo scenarios: `~1-3s`
-- Live decisions (warm app): `~4-8s`
-- Live decisions (cold start or upstream slowness): can exceed `10s`
-
-If you see repeated `>10s` live responses:
-1. Use the recommended Azure tuning profile in section 10.1.
-2. Confirm app is warm (cold starts are common on cost-optimized plans).
-3. Check dependency latency in logs (Electricity Maps and OpenAI).
-
-## 15. Implemented but Not Yet Integrated (Future Work)
-
-The following items are already present in code/config scaffolding but are not currently part of the active routing-first user journey, or are not enabled by default:
-
-### 15.1 Forecast retrieval pipeline (implemented, feature-flagged)
-- `src/sensor.py` includes `get_carbon_intensity_forecast(...)` with parsing, filtering, caching, retries.
-- `src/config.py` includes `FORECAST_WINDOW_HOURS`.
-- `src/config.py` includes `ENABLE_POSTPONE_FORECAST_RECOMMENDATION` (default `false`).
-- `src/models.py` includes `ForecastPoint` and `ForecastResult`.
-- `tests/test_sensor.py` includes forecast tests.
-
-Current status: postpone flow can request forecast guidance when `ENABLE_POSTPONE_FORECAST_RECOMMENDATION=true`; default remains off for entitlement safety and deterministic baseline demos.
-
-### 15.2 Parallel candidate fetch mode (implemented, disabled by default)
-- `src/sensor.py` has `_fetch_parallel(...)` and parity tests.
-- Config supports `CANDIDATE_FETCH_MODE=parallel` and `PARALLEL_FETCH_WORKERS`.
-
-Current status: default remains `sequential` for quota/rate safety unless env is changed.
-
-### 15.3 Legacy Gradio app path (present but out of parity)
-- Legacy Gradio prototype is isolated at `/Users/tejaswath/projects/carbon_advisor/legacy/gradio_app.py`.
-- Root `/Users/tejaswath/projects/carbon_advisor/app.py` is now a minimal pointer/stub to avoid reviewer confusion.
-
-Current status: main product path is FastAPI + Next.js, not Gradio.
-
-### 15.4 Data-source expansion not yet integrated
-Electricity Maps supports broader signals and endpoints beyond current flow (forecast entitlements, mix/load/price/LMP/data-center optimizers), but these are not integrated into active decision policy.
-
-### 15.5 Advanced geo selection is heuristic-only
-- Current geolocation suggestion maps coordinates to Swedish zones via simple bounding heuristics.
-
-Current status: no reverse geocoding provider or zone-resolution endpoint integration yet.
-
-### 15.6 Multi-tenant auth and role model
-- Federated login is implemented (Google, optional GitHub) with JWT sessions and route protection.
-- Still deferred:
-  - role-based authorization (for example approver vs observer roles),
-  - organization/tenant boundaries,
-  - signed audit attestations and enterprise SSO (SAML/OIDC) integration.
-
-### 15.7 Minimum routing improvement threshold
-- Current routing policy routes whenever a candidate satisfies threshold compliance.
-- A V2 policy refinement can require a minimum improvement delta (for example, at least 20% lower than local intensity) before recommending routing, to avoid low-value reroutes.
-
-## 16. Known Constraints
-- Live behavior depends on token permissions and zone coverage for `latest`.
-- Routing recommendation is advisory; manager can override.
-- No commercial entitlements handling is embedded; this repo assumes your key has required access.
-- Demo scenarios intentionally use synthetic values and should be labeled as demo mode during presentations.
+## 17) Repository Map
+- `/Users/tejaswath/projects/carbon_advisor/backend/app/main.py` - FastAPI app + startup/lifespan.
+- `/Users/tejaswath/projects/carbon_advisor/backend/app/api/routes.py` - API endpoints.
+- `/Users/tejaswath/projects/carbon_advisor/backend/app/services/workflow_service.py` - workflow orchestration/service layer.
+- `/Users/tejaswath/projects/carbon_advisor/backend/app/services/checkpointer.py` - sqlite/postgres checkpointer init.
+- `/Users/tejaswath/projects/carbon_advisor/src/agent.py` - LangGraph construction and nodes.
+- `/Users/tejaswath/projects/carbon_advisor/src/sensor.py` - Electricity Maps integration and caching.
+- `/Users/tejaswath/projects/carbon_advisor/src/policy.py` - routing policy rules.
+- `/Users/tejaswath/projects/carbon_advisor/src/auditor.py` - LLM/template audit generation.
+- `/Users/tejaswath/projects/carbon_advisor/frontend/app/page.tsx` - main dashboard UI.
+- `/Users/tejaswath/projects/carbon_advisor/frontend/app/login/page.tsx` - auth/login UI.
+- `/Users/tejaswath/projects/carbon_advisor/frontend/lib/auth.ts` - Auth.js provider configuration.
+- `/Users/tejaswath/projects/carbon_advisor/frontend/middleware.ts` - route protection.
+- `/Users/tejaswath/projects/carbon_advisor/ARCHITECTURE.md` - production scaling narrative.
