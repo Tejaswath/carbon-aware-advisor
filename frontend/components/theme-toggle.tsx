@@ -12,7 +12,7 @@ export function ThemeToggle({ resolvedTheme, onToggle, className }: ThemeToggleP
       type="button"
       className={
         className ??
-        "rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
+        "rounded-full border border-zinc-300/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-zinc-200/60 dark:border-zinc-700 dark:hover:bg-zinc-800"
       }
       onClick={onToggle}
       aria-label={`Switch to ${resolvedTheme === "dark" ? "light" : "dark"} mode`}

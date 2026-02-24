@@ -692,6 +692,7 @@ export default function HomePage() {
   const showErrorControls = uiState === "error";
   const showApprovalControls = uiState === "awaiting_approval";
   const auditParagraphs = splitAuditParagraphs(decision.audit_report);
+  const stepConnectorWidth = Math.max(0, Math.min(currentWorkflowStepIndex, WORKFLOW_STEPS.length - 1));
 
   if (sessionStatus === "loading") {
     return (
@@ -720,30 +721,31 @@ export default function HomePage() {
               <p className="mt-3 max-w-2xl text-sm text-fern md:text-base">
                 Real-time GreenOps routing with manager governance and auditable decision trails.
               </p>
-              <p className="mt-2 text-xs uppercase tracking-[0.15em] text-fern">Forecast Mode: Disabled (Routing-First)</p>
             </div>
-            <div className="flex items-center gap-2">
-              {approverEmail && (
-                <span className="max-w-[220px] truncate rounded-full border border-moss/30 px-3 py-1 text-xs text-fern" title={approverEmail}>
-                  {approverEmail}
-                </span>
-              )}
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              <StatusBadge status={statusForBadge} />
               <ThemeToggle resolvedTheme={resolvedTheme} onToggle={toggleTheme} />
               <button
                 type="button"
-                className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
+                className="rounded-full border border-zinc-300/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-zinc-200/60 dark:border-zinc-700 dark:hover:bg-zinc-800"
                 onClick={() => setShowIntroModal(true)}
               >
                 Help
               </button>
-              <button
-                type="button"
-                className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
-                onClick={() => void signOut({ callbackUrl: "/login" })}
-              >
-                Sign out
-              </button>
-              <StatusBadge status={statusForBadge} />
+              <div className="ml-1 flex items-center gap-2 text-xs text-fern">
+                {approverEmail && (
+                  <span className="max-w-[220px] truncate rounded-full border border-zinc-300/70 px-3 py-1 text-xs text-fern dark:border-zinc-700" title={approverEmail}>
+                    {approverEmail}
+                  </span>
+                )}
+                <button
+                  type="button"
+                  className="rounded-full border border-zinc-300/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-zinc-200/60 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                  onClick={() => void signOut({ callbackUrl: "/login" })}
+                >
+                  Sign out
+                </button>
+              </div>
             </div>
           </div>
         </section>
@@ -753,7 +755,7 @@ export default function HomePage() {
             <label className="space-y-2 md:col-span-1">
               <span className="text-sm font-semibold text-ink">Estimated Job Energy (kWh)</span>
               <input
-                className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm"
                 type="text"
                 inputMode="numeric"
                 pattern="[0-9]*"
@@ -767,7 +769,7 @@ export default function HomePage() {
             <label className="space-y-2 md:col-span-1">
               <span className="text-sm font-semibold text-ink">Carbon Threshold (gCO2eq/kWh)</span>
               <input
-                className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm"
                 type="text"
                 inputMode="numeric"
                 pattern="[0-9]*"
@@ -784,7 +786,7 @@ export default function HomePage() {
                 }}
               />
               <select
-                className="w-full rounded-xl border border-moss/30 bg-white px-4 py-2 text-sm text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-2 text-sm text-ink shadow-sm"
                 value={thresholdPreset}
                 onChange={(e) => {
                   const selectedPreset = e.target.value as ThresholdPresetKey;
@@ -813,7 +815,7 @@ export default function HomePage() {
             <label className="space-y-2 md:col-span-1">
               <span className="text-sm font-semibold text-ink">Primary Grid Zone</span>
               <select
-                className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm"
                 value={zone}
                 onChange={(e) => setZone(e.target.value)}
               >
@@ -867,7 +869,7 @@ export default function HomePage() {
               <span className="text-xs font-semibold uppercase tracking-wide text-fern">Approver Email (required for approvals)</span>
               <span className="block text-xs text-fern">Sourced from your signed-in Google account and stored in the backend audit trail.</span>
               <input
-                className="w-full rounded-xl border border-moss/30 bg-moss/10 px-4 py-3 text-sm text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm"
                 type="text"
                 value={approverEmail || "Signed-in email unavailable"}
                 readOnly
@@ -887,9 +889,7 @@ export default function HomePage() {
                 >
                   {showApproverProfile ? "Hide Approver Profile" : "Show Approver Profile"}
                 </button>
-                <span className="rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-sky-700 dark:border-sky-800 dark:bg-sky-900/30 dark:text-sky-300">
-                  Client-side only
-                </span>
+                <span className="text-[11px] font-medium uppercase tracking-wide text-fern/85">client-side only</span>
               </div>
               <p className="text-sm text-fern">Local context fields help demo storytelling. They are never sent to backend APIs.</p>
             </div>
@@ -900,7 +900,7 @@ export default function HomePage() {
               <label className="space-y-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-fern">Approver Name</span>
                 <input
-                  className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
+                  className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm"
                   type="text"
                   value={approverName}
                   onChange={(e) => setApproverName(e.target.value)}
@@ -910,7 +910,7 @@ export default function HomePage() {
               <label className="space-y-2">
                 <span className="text-xs font-semibold uppercase tracking-wide text-fern">Organization</span>
                 <input
-                  className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
+                  className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm"
                   type="text"
                   value={approverOrg}
                   onChange={(e) => setApproverOrg(e.target.value)}
@@ -922,7 +922,7 @@ export default function HomePage() {
 
           <div className="mt-6 space-y-4">
             {showLiveControls && (
-              <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-moss/25 bg-moss/5 p-4">
+              <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-zinc-300/70 bg-zinc-100/65 p-4 dark:border-zinc-800 dark:bg-zinc-900/70">
                 <button
                   className="rounded-xl border border-transparent bg-[#1f5f3f] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[#2b7a52] disabled:cursor-not-allowed disabled:bg-[#7fae97] disabled:text-white/85 dark:bg-emerald-400 dark:text-[#04120a] dark:hover:bg-emerald-300 dark:disabled:border-zinc-600 dark:disabled:bg-zinc-700 dark:disabled:text-zinc-300"
                   onClick={() => void onStart()}
@@ -943,7 +943,7 @@ export default function HomePage() {
             )}
 
             {(uiState === "idle" || uiState === "submitting") && showDemoScenarios && (
-              <div className="rounded-2xl border border-dashed border-fern/35 bg-white/60 p-4 dark:bg-zinc-900/60">
+              <div className="rounded-2xl border border-dashed border-fern/35 bg-zinc-100/80 p-4 dark:bg-zinc-900/70">
                 <p className="text-xs font-semibold uppercase tracking-wide text-fern">Demo Scenarios</p>
                 <p className="mt-1 text-xs text-fern">Deterministic scenarios for interview-ready outcomes.</p>
                 <div className="mt-3 flex flex-wrap gap-3">
@@ -973,9 +973,9 @@ export default function HomePage() {
             )}
 
             {showApprovalControls && (
-              <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4 dark:border-amber-900 dark:bg-amber-900/20">
+              <div className="rounded-2xl border border-amber-300/70 bg-zinc-100/80 p-4 dark:border-amber-700/70 dark:bg-zinc-900/80">
                 <p className="text-xs font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">Manager Approval Required</p>
-                <div className="mt-3 rounded-xl border border-moss/25 bg-white/80 p-3 text-sm text-ink dark:border-moss/40 dark:bg-zinc-900/65">
+                <div className="mt-3 rounded-xl border border-moss/25 bg-zinc-50/95 p-3 text-sm text-ink dark:border-moss/40 dark:bg-zinc-900/65">
                   <p className="text-xs font-semibold uppercase tracking-wide text-fern">Decision Briefing</p>
                   <p className="mt-2 text-sm text-fern">
                     Primary zone <span className="font-semibold text-ink">{decision.primary_zone}</span> is at{" "}
@@ -1035,7 +1035,7 @@ export default function HomePage() {
                         Override Reason (required)
                       </span>
                       <textarea
-                        className="min-h-20 w-full rounded-xl border border-amber-300 bg-white px-4 py-3 text-sm text-ink shadow-sm dark:border-amber-800"
+                        className="input-surface min-h-20 w-full rounded-xl border border-amber-300 px-4 py-3 text-sm text-ink shadow-sm dark:border-amber-800"
                         value={overrideReason}
                         onChange={(e) => setOverrideReason(e.target.value)}
                         placeholder="This action overrides the policy recommendation. Provide justification."
@@ -1093,13 +1093,21 @@ export default function HomePage() {
                 Run mode: {activeDemoScenario ? DEMO_SCENARIO_LABELS[activeDemoScenario] : "Live API"}
               </p>
 
-              <div className="mt-4 rounded-xl border border-moss/25 bg-white/60 p-4 dark:bg-zinc-900/60">
-                <ol className="grid gap-2 md:grid-cols-5">
+              <div className="mt-4 rounded-xl border border-moss/25 bg-zinc-100/80 p-4 dark:bg-zinc-900/70">
+                <div className="relative">
+                  <div className="pointer-events-none absolute left-3 right-3 top-3 hidden h-[2px] rounded-full bg-zinc-300 dark:bg-zinc-700 md:block">
+                    <span
+                      className="block h-full rounded-full bg-emerald-500/60 transition-all"
+                      style={{ width: `${(stepConnectorWidth / (WORKFLOW_STEPS.length - 1)) * 100}%` }}
+                    />
+                  </div>
+                </div>
+                <ol className="grid gap-4 md:grid-cols-5 md:gap-8">
                   {WORKFLOW_STEPS.map((step, index) => {
                     const isComplete = currentWorkflowStepIndex > index;
                     const isActive = currentWorkflowStepIndex === index;
                     return (
-                      <li key={step} className="flex items-center gap-2">
+                      <li key={step} className="relative flex items-center gap-2">
                         <span
                           className={`inline-flex h-6 w-6 items-center justify-center rounded-full border text-xs font-bold ${
                             isComplete
@@ -1111,13 +1119,13 @@ export default function HomePage() {
                         >
                           {index + 1}
                         </span>
-                        <span className={`text-xs font-semibold ${isActive ? "text-ink" : "text-fern"}`}>{step}</span>
+                        <span className={`text-sm font-semibold ${isActive ? "text-ink" : "text-fern"}`}>{step}</span>
                       </li>
                     );
                   })}
                 </ol>
                 {activeProcessingStep && (
-                  <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-fern">Step: {activeProcessingStep}</p>
+                  <p className="mt-3 text-sm text-fern">Current stage: {activeProcessingStep}</p>
                 )}
                 {showProcessingBar && (
                   <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-moss/20 dark:bg-moss/35">
@@ -1143,41 +1151,41 @@ export default function HomePage() {
         {hasDecision && (
           <>
             <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <article className="panel-strong rounded-2xl p-4">
-                <p className="text-xs uppercase tracking-[0.14em] text-fern">Primary Zone Intensity</p>
+              <article className="panel-strong rounded-2xl px-6 py-5">
+                <p className="text-xs uppercase tracking-[0.16em] text-fern">Primary Zone Intensity</p>
                 <div className="mt-2 min-h-9">
                   {uiState === "processing" && decision.primary_intensity === null ? (
                     <span className="inline-block h-8 w-20 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
                   ) : (
-                    <p className={`text-2xl font-bold ${intensityClassName(primaryIntensitySeverity)}`}>{decision.primary_intensity ?? "-"}</p>
+                    <p className={`text-3xl font-semibold ${intensityClassName(primaryIntensitySeverity)}`}>{decision.primary_intensity ?? "-"}</p>
                   )}
                 </div>
                 <p className="text-sm text-fern">gCO2eq/kWh</p>
               </article>
-              <article className="panel-strong rounded-2xl p-4">
-                <p className="text-xs uppercase tracking-[0.14em] text-fern">Selected Execution Zone</p>
+              <article className="panel-strong rounded-2xl px-6 py-5">
+                <p className="text-xs uppercase tracking-[0.16em] text-fern">Selected Execution Zone</p>
                 <div className="mt-2 min-h-9">
                   {uiState === "processing" && decision.selected_execution_zone === null ? (
                     <span className="inline-block h-8 w-24 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
                   ) : (
-                    <p className="text-2xl font-bold text-ink">{decision.selected_execution_zone ?? "-"}</p>
+                    <p className="text-3xl font-semibold text-ink">{decision.selected_execution_zone ?? "-"}</p>
                   )}
                 </div>
                 <p className={`text-sm ${intensityClassName(selectedIntensitySeverity)}`}>{decision.selected_execution_intensity ?? "-"} gCO2eq/kWh</p>
               </article>
-              <article className="panel-strong rounded-2xl p-4">
-                <p className="text-xs uppercase tracking-[0.14em] text-fern">Execution Mode</p>
+              <article className="panel-strong rounded-2xl px-6 py-5">
+                <p className="text-xs uppercase tracking-[0.16em] text-fern">Execution Mode</p>
                 <div className="mt-2 min-h-9">
                   {uiState === "processing" && decision.execution_mode === null ? (
                     <span className="inline-block h-8 w-16 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
                   ) : (
-                    <p className="text-2xl font-bold text-ink">{decision.execution_mode ?? "-"}</p>
+                    <p className="text-3xl font-semibold text-ink">{decision.execution_mode ?? "-"}</p>
                   )}
                 </div>
                 <p className="text-sm text-fern">local / routed / postponed</p>
               </article>
               <article
-                className={`rounded-2xl p-4 ${
+                className={`rounded-2xl px-6 py-5 ${
                   isRealized
                     ? "border border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-900/20"
                     : isForegone
@@ -1186,7 +1194,7 @@ export default function HomePage() {
                 }`}
               >
                 <p
-                  className={`text-xs uppercase tracking-[0.14em] ${
+                  className={`text-xs uppercase tracking-[0.16em] ${
                     isRealized ? "text-emerald-700 dark:text-emerald-300" : isForegone ? "text-amber-700 dark:text-amber-300" : "text-fern"
                   }`}
                 >
@@ -1197,7 +1205,7 @@ export default function HomePage() {
                     <span className="inline-block h-8 w-20 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
                   ) : (
                     <p
-                      className={`text-2xl font-bold ${
+                      className={`text-3xl font-semibold ${
                         isRealized ? "text-emerald-800 dark:text-emerald-300" : isForegone ? "text-amber-800 dark:text-amber-300" : "text-ink"
                       }`}
                     >
@@ -1273,12 +1281,17 @@ export default function HomePage() {
                       <th className="px-4 py-3 font-semibold text-ink">Cost Impact</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-moss/10 bg-white/70 dark:bg-zinc-900/60">
-                    {tradeoffRows.map((row) => {
+                  <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
+                    {tradeoffRows.map((row, index) => {
                       const selected = chosenTradeoffOption === row.option;
                       return (
-                        <tr key={row.option} className={selected ? "bg-emerald-50/70 dark:bg-emerald-900/20" : ""}>
-                          <td className={`px-4 py-3 font-semibold text-ink ${selected ? "border-l-4 border-emerald-500" : ""}`}>{row.option}</td>
+                        <tr
+                          key={row.option}
+                          className={`${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} ${
+                            selected ? "ring-1 ring-inset ring-emerald-300/50 dark:ring-emerald-700/40" : ""
+                          }`}
+                        >
+                          <td className={`px-4 py-3 text-ink ${selected ? "border-l-2 border-emerald-500 font-bold" : "font-semibold"}`}>{row.option}</td>
                           <td className="px-4 py-3 text-ink">{row.zone}</td>
                           <td className="px-4 py-3 text-ink">{row.carbon}</td>
                           <td className="px-4 py-3 text-ink">{row.latency}</td>
@@ -1310,17 +1323,20 @@ export default function HomePage() {
                   <thead className="bg-moss/10 text-left">
                     <tr>
                       <th className="px-4 py-3 font-semibold text-ink">Zone</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Intensity (gCO2eq/kWh)</th>
+                      <th className="px-4 py-3 text-right font-semibold text-ink">Intensity (gCO2eq/kWh)</th>
                       <th className="px-4 py-3 font-semibold text-ink">Updated</th>
                       <th className="px-4 py-3 font-semibold text-ink">Status</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-moss/10 bg-white/70 dark:bg-zinc-900/60">
+                  <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
                     {decision.routing_top3.length > 0 ? (
-                      decision.routing_top3.map((candidate) => (
-                        <tr key={`${candidate.zone}-${candidate.datetime ?? "none"}`}>
+                      decision.routing_top3.map((candidate, index) => (
+                        <tr
+                          key={`${candidate.zone}-${candidate.datetime ?? "none"}`}
+                          className={index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"}
+                        >
                           <td className="px-4 py-3 text-ink">{candidate.zone}</td>
-                          <td className="px-4 py-3 font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
+                          <td className="px-4 py-3 text-right font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
                           <td className="px-4 py-3 text-ink">{formatTimestamp(candidate.datetime)}</td>
                           <td className="px-4 py-3 text-ink">{candidate.ok ? "OK" : `Error: ${candidate.error ?? "unknown"}`}</td>
                         </tr>
@@ -1342,19 +1358,26 @@ export default function HomePage() {
               {decision.timeline.length === 0 ? (
                 <p className="mt-3 text-sm text-fern">Timeline appears as the workflow executes.</p>
               ) : (
-                <div className="mt-4 space-y-3">
+                <div className="mt-4 space-y-3 border-l-2 border-zinc-300/80 pl-4 dark:border-zinc-700">
                   {decision.timeline.map((event, index) => (
                     <details
                       key={`${event.ts}-${event.stage}-${index}`}
                       open={index === decision.timeline.length - 1}
-                      className="rounded-xl border border-moss/20 bg-white/70 px-4 py-3 dark:bg-zinc-900/60"
+                      className="relative rounded-xl border border-moss/20 bg-zinc-50/80 px-4 py-3 dark:bg-zinc-900/60"
                     >
+                      <span
+                        className={`pointer-events-none absolute -left-[1.2rem] top-4 h-2.5 w-2.5 rounded-full border ${
+                          index === decision.timeline.length - 1
+                            ? "border-emerald-400 bg-emerald-400/80"
+                            : "border-zinc-400 bg-zinc-300 dark:border-zinc-600 dark:bg-zinc-700"
+                        }`}
+                      />
                       <summary className="cursor-pointer text-sm font-semibold text-ink">
                         {formatTimestamp(event.ts)} | {event.stage} | {event.message}
                       </summary>
                       {event.data && Object.keys(event.data).length > 0 && (
                         <details className="mt-3 rounded border border-moss/20 bg-slate-50 dark:bg-zinc-900/80">
-                          <summary className="cursor-pointer px-3 py-2 text-xs font-semibold uppercase tracking-wide text-fern">
+                          <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-fern">
                             Show technical details
                           </summary>
                           <pre className="overflow-x-auto border-t border-moss/20 px-3 py-3 text-xs text-slate-700 dark:text-slate-200">
