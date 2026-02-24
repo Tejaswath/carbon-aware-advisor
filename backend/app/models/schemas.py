@@ -64,3 +64,5 @@ class HealthResponse(BaseModel):
     status: Literal["ok"]
     storage_mode: Literal["sqlite", "postgres"]
     langgraph_db_path: str | None = None
+    sensor_reachable: bool = False
+    last_sensor_success_at: str | None = None

@@ -17,6 +17,19 @@ def _get_int(name: str, default: int) -> int:
         return default
 
 
+def _get_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        parsed = float(value)
+    except ValueError:
+        return default
+    if parsed <= 0:
+        return default
+    return parsed
+
+
 def _get_csv_list(name: str, default: str, *, strip_trailing_slash: bool = False) -> list[str]:
     raw_value = os.getenv(name, default)
     values = [value.strip() for value in raw_value.split(",")]
@@ -69,6 +82,7 @@ class Settings:
     parallel_fetch_workers: int
     enable_postpone_forecast_recommendation: bool
     openai_model: str
+    llm_audit_timeout_seconds: float
     database_url: str
     langgraph_db_path: str
 
@@ -93,6 +107,7 @@ settings = Settings(
     parallel_fetch_workers=_get_int("PARALLEL_FETCH_WORKERS", 3),
     enable_postpone_forecast_recommendation=_get_bool("ENABLE_POSTPONE_FORECAST_RECOMMENDATION", False),
     openai_model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
+    llm_audit_timeout_seconds=_get_float("LLM_AUDIT_TIMEOUT_SECONDS", 5.0),
     database_url=_normalize_database_url("DATABASE_URL"),
     langgraph_db_path=os.getenv("LANGGRAPH_DB_PATH", "./langgraph_checkpoints.db"),
 )

@@ -16,6 +16,7 @@ using Electricity Maps carbon-intensity data, explicit policy rules, human appro
 - [4. UX Behavior and What Inputs Mean](#4-ux-behavior-and-what-inputs-mean)
 - [5. End-to-End Decision Lifecycle](#5-end-to-end-decision-lifecycle)
 - [6. System Architecture](#6-system-architecture)
+- [6.1 Production Scaling Narrative](#61-production-scaling-narrative)
 - [7. Policy Logic](#7-policy-logic)
 - [7.1 Data Sovereignty Considerations](#71-data-sovereignty-considerations)
 - [8. LangGraph Interrupt/Resume Design](#8-langgraph-interruptresume-design)
@@ -82,6 +83,7 @@ Computed and returned for each decision:
 
 ### 3.5 Audit and replay
 - Generated operational audit text (`llm` or `template` fallback).
+- Frontend cleans common markdown artifacts from LLM audit output for readable rendering.
 - Decision replay timeline with stage-by-stage events.
 - CSV export endpoint for decision-level audit records.
 - Audit artifacts include `manager_id` and `override_reason` when applicable.
@@ -90,9 +92,9 @@ Computed and returned for each decision:
 ### 3.6 Frontend controls for demonstration reliability
 - Live evaluation button (`Evaluate and decide (Live)`).
 - Deterministic scenario buttons:
-  - `Force Clean Path`
-  - `Force Route Path`
-  - `Force Approval Path`
+  - `Demo: Grid Clean`
+  - `Demo: Route Available`
+  - `Demo: Needs Approval`
 
 ### 3.7 Primary-zone UX improvements
 - Dropdown-based zone selection.
@@ -119,8 +121,28 @@ This keeps tradeoff visibility correct across routed, local-clean, and local-ove
 ### 3.9 Outcome-aware savings card
 - The summary savings card is state-aware:
   - `Routing Savings` (green) when savings are realized (`execution_mode=routed` and savings > 0).
-  - `Foregone Savings` (amber) when route savings existed but local execution was chosen (`execution_mode=local` and savings > 0).
-  - Neutral style for zero/unknown savings.
+- `Foregone Savings` (amber) when route savings existed but local execution was chosen (`execution_mode=local` and savings > 0).
+- Neutral style for zero/unknown savings.
+
+### 3.10 Theme support
+- UI supports light and dark themes with a header toggle.
+- First visit follows system preference; explicit user choice is persisted in browser localStorage.
+- Dark mode uses neutral charcoal surfaces with high-contrast text and green as an accent color (not a background tint).
+- Primary CTA, modal overlays, status badges, stepper, and table surfaces are contrast-tuned for both themes.
+
+### 3.11 Decision UX and onboarding upgrades
+- Live and demo controls are state-aware:
+  - Live action remains primary.
+  - Demo scenarios are grouped under a collapsible section.
+  - Approval actions render in a dedicated manager decision card.
+- Approval state includes a compact `Decision Briefing` block with local vs routed estimates and savings before action buttons.
+- Help modal is task-focused and structured as:
+  - What this solves
+  - How to run a decision
+  - How approval works
+  - Understanding results
+  - Data handling
+- Policy and approval copy is human-readable; raw backend enum strings are intentionally hidden in primary UX surfaces.
 
 ## 4. UX Behavior and What Inputs Mean
 
@@ -149,6 +171,10 @@ These use synthetic intensities in backend workflow state to guarantee a predict
 ### Postpone guidance placement
 - Postpone forecast guidance is rendered in the `Execution Tradeoff Comparison` section.
 - If no recommendation is available, UI explicitly shows: `No forecast guidance available — check back manually.`
+
+### Approver fields and data handling
+- `Approver Email` is the governance field and is stored in backend audit artifacts when manager actions are submitted.
+- `Approver Name` and `Organization` are local-only context fields for demo readability and are not sent to backend APIs.
 
 ## 5. End-to-End Decision Lifecycle
 1. Client starts decision with `{zone, threshold, estimated_kwh, optional demo_scenario}`.
@@ -189,6 +215,11 @@ flowchart LR
   - Next.js app UI, typed API client, decision rendering.
 - `tests/`
   - Backend, policy, sensor, workflow, and API behavior tests.
+
+## 6.1 Production Scaling Narrative
+For interview discussion on scale and reliability tradeoffs, see:
+
+- `/Users/tejaswath/projects/carbon_advisor/ARCHITECTURE.md`
 
 ## 7. Policy Logic
 Given `current_intensity`, `threshold`, and best candidate (if any):
@@ -306,7 +337,9 @@ Example (sqlite mode):
 {
   "status": "ok",
   "storage_mode": "sqlite",
-  "langgraph_db_path": "./langgraph_checkpoints.db"
+  "langgraph_db_path": "./langgraph_checkpoints.db",
+  "sensor_reachable": false,
+  "last_sensor_success_at": null
 }
 ```
 
@@ -315,7 +348,9 @@ Example (postgres mode):
 {
   "status": "ok",
   "storage_mode": "postgres",
-  "langgraph_db_path": null
+  "langgraph_db_path": null,
+  "sensor_reachable": true,
+  "last_sensor_success_at": "2026-02-23T16:22:24.358257+00:00"
 }
 ```
 
@@ -343,6 +378,7 @@ Routing/runtime controls:
 - `REQUEST_TIMEOUT_SECONDS` (default `10`)
 - `CACHE_TTL_SECONDS` (default `300`)
 - `RETRY_MAX_ATTEMPTS` (default `3`)
+- `LLM_AUDIT_TIMEOUT_SECONDS` (default `5`; hard cap for LLM audit generation before template fallback)
 - `DATABASE_URL` (optional; when set, backend uses async Postgres checkpointer)
 - `LANGGRAPH_DB_PATH` (default `./langgraph_checkpoints.db`; used when `DATABASE_URL` is not set)
 
@@ -355,6 +391,13 @@ Database URL normalization:
 
 Legacy/unused in active routing flow:
 - `FORECAST_WINDOW_HOURS` (see Future Work section)
+
+Recommended Azure tuning profile (reduce long-tail latency):
+- `CANDIDATE_FETCH_MODE=parallel`
+- `MAX_ROUTING_CANDIDATES=4`
+- `REQUEST_TIMEOUT_SECONDS=6`
+- `RETRY_MAX_ATTEMPTS=2`
+- `LLM_AUDIT_TIMEOUT_SECONDS=5`
 
 ### 10.2 Frontend env (`frontend/.env.local`)
 - `NEXT_PUBLIC_API_BASE_URL` (default `http://localhost:8000/api/v1`)
@@ -389,6 +432,7 @@ Then restart backend and verify startup log:
 
 Optional API verification:
 - `curl http://localhost:8000/api/v1/health` should return `"storage_mode":"postgres"` when `DATABASE_URL` is set.
+- health payload also includes sensor telemetry (`sensor_reachable`, `last_sensor_success_at`).
 
 ### 11.2 Frontend
 ```bash
@@ -437,9 +481,9 @@ npm run build
 ## 13. Demo Playbook (Interview-Ready)
 
 Recommended flow:
-1. Run `Force Clean Path` and show automatic local execution.
-2. Run `Force Route Path` and choose `route`.
-3. Run `Force Approval Path` and choose `postpone`.
+1. Run `Demo: Grid Clean` and show automatic local execution.
+2. Run `Demo: Route Available` and choose `route`.
+3. Run `Demo: Needs Approval` and choose `postpone`.
 4. Expand timeline events to explain decision trace.
 5. Download CSV and show governance fields (`manager_id`, `override_reason`, action trail).
 6. Run one live decision and compare behavior versus deterministic demo mode.
@@ -449,22 +493,33 @@ Manual UX validation scenarios:
    - Enter `01500` in kWh and blur; it should normalize to `1500`.
    - Enter `030` in threshold and blur; it should normalize to `30`.
 2. Clean local where candidates exist:
-   - Trigger `Force Clean Path`.
+   - Trigger `Demo: Grid Clean`.
    - Confirm `policy_action=run_now_local` and `execution_mode=local`.
    - Confirm `routing_top3` contains valid candidates.
    - Verify the tradeoff table `Route` row still shows a candidate zone and route latency/residency context (carbon may remain `N/A` only when routed kgCO2 is truly unavailable).
 3. Routeable dirty with route:
-   - Trigger `Force Route Path`, then choose `route`.
+   - Trigger `Demo: Route Available`, then choose `route`.
    - Verify route row and savings card represent realized routing outcome (`Routing Savings`, green).
 4. Routeable dirty with local override:
-   - Trigger `Force Route Path`, then choose `run_local`.
+   - Trigger `Demo: Route Available`, then choose `run_local`.
    - Verify route row still reflects available route context and savings card shows `Foregone Savings` (amber) when savings > 0.
 5. Non-routeable dirty with postpone:
-   - Trigger `Force Approval Path`, then choose `postpone`.
+   - Trigger `Demo: Needs Approval`, then choose `postpone`.
    - Verify postpone status and tradeoff-section forecast guidance/fallback messaging.
 6. Live path safety:
    - Trigger `Evaluate and decide (Live)`.
    - Verify no crashes and neutral savings styling for clean local outcomes without positive savings.
+7. Dark mode quality:
+   - Toggle dark mode from header.
+   - Verify primary CTA remains clearly visible in both enabled and disabled states.
+   - Verify Help modal readability and backdrop layering (no background bleed-through).
+8. Approval briefing and copy:
+   - Trigger `Demo: Route Available` until `awaiting_approval`.
+   - Confirm `Decision Briefing` shows local/routed/savings values before action buttons.
+   - Confirm no raw enum strings (for example `route_to_clean_region`, `run_local`) appear in user-facing prompt text.
+9. Audit formatting:
+   - Complete any decision with `audit_mode=llm`.
+   - Confirm audit text renders without raw markdown markers such as `**...**`.
 
 Acceptance criterion addendum:
 1. `Execution Tradeoff Comparison` must render candidate-based route context for all policy branches (`run_now_local`, `route_to_clean_region`, `require_manager_decision`) whenever a valid non-primary candidate exists.
@@ -484,6 +539,9 @@ Acceptance criterion addendum:
 - For SQLite mode, mount persistent writable storage and point `LANGGRAPH_DB_PATH` to it.
 - For multi-worker/high-throughput deployment, prefer Postgres mode.
 - Current frontend status tracking uses polling; a V2 transport can move to SSE/WebSocket push updates to reduce polling overhead and improve responsiveness.
+- `/api/v1/health` includes dependency-level sensor telemetry:
+  - `sensor_reachable`
+  - `last_sensor_success_at`
 
 ### 14.1 Async Postgres migration status (current stable state)
 
@@ -543,6 +601,29 @@ Common troubleshooting:
 - If start works but polling fails, check backend logs for checkpointer mode and initialization errors.
 - Ensure `CORS_ORIGINS` uses origins without trailing slash (normalization now helps, but explicit clean values are still recommended).
 - If you see `Called get_config outside of a runnable context`, update to the latest backend revision and restart Uvicorn; manager-interrupt nodes must run through the sync LangGraph execution path (`stream/get_state`) wrapped in `asyncio.to_thread(...)` inside the async service layer.
+
+### 14.3 Latency controls and expectations
+
+Why live requests can feel slow:
+- Candidate zone fan-out can require several external API calls.
+- Retries/backoff are intentionally enabled for transient dependency failures.
+- LLM audit generation can add tail latency when model response time spikes.
+- Cloud cold starts (especially lower-cost tiers) can add startup delay.
+
+Safe latency controls implemented:
+- `LLM_AUDIT_TIMEOUT_SECONDS` hard-caps LLM audit generation.
+- On LLM timeout/error, audit generation falls back to template mode automatically.
+- No lock/threading model changes are required for these latency controls.
+
+Typical observed ranges (with tuned Azure profile):
+- Demo scenarios: `~1-3s`
+- Live decisions (warm app): `~4-8s`
+- Live decisions (cold start or upstream slowness): can exceed `10s`
+
+If you see repeated `>10s` live responses:
+1. Use the recommended Azure tuning profile in section 10.1.
+2. Confirm app is warm (cold starts are common on cost-optimized plans).
+3. Check dependency latency in logs (Electricity Maps and OpenAI).
 
 ## 15. Implemented but Not Yet Integrated (Future Work)
 

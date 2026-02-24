@@ -4,12 +4,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 import { PolicyActionBadge, StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
-import { DecisionResponse, DemoScenario, ManagerOption } from "@/lib/types";
+import { DecisionResponse, DemoScenario, ManagerOption, StartDecisionRequest } from "@/lib/types";
 
 const POLL_MS = 2000;
 const TIMEOUT_MS = 90000;
 const GEOLOCATION_TIMEOUT_MS = 15000;
 const MARGINAL_OVER_THRESHOLD_FACTOR = 1.3;
+const MANAGER_CONFIRM_TIMEOUT_MS = 3000;
 const DEFAULT_PRIMARY_ZONES = ["SE-SE1", "SE-SE2", "SE-SE3", "SE-SE4"];
 const CONFIGURED_PRIMARY_ZONES = (
   process.env.NEXT_PUBLIC_PRIMARY_ZONES ?? DEFAULT_PRIMARY_ZONES.join(",")
@@ -34,10 +35,11 @@ const MANAGER_ID_STORAGE_KEY = "carbon_advisor.manager_id";
 const APPROVER_NAME_STORAGE_KEY = "carbon_advisor.approver_name";
 const APPROVER_ORG_STORAGE_KEY = "carbon_advisor.approver_org";
 const INTRO_SEEN_STORAGE_KEY = "carbon_advisor.intro_seen";
+const THEME_STORAGE_KEY = "carbon_advisor.theme";
 const DEMO_SCENARIO_LABELS: Record<DemoScenario, string> = {
-  clean_local: "Demo: Clean Local",
-  routeable_dirty: "Demo: Routeable Dirty",
-  non_routeable_dirty: "Demo: No Route (Approval)"
+  clean_local: "Demo: Grid Clean",
+  routeable_dirty: "Demo: Route Available",
+  non_routeable_dirty: "Demo: Needs Approval"
 };
 const THRESHOLD_PRESETS = [
   {
@@ -59,9 +61,11 @@ const THRESHOLD_PRESETS = [
     description: "Permissive policy. Fewer routing decisions."
   }
 ] as const;
+const WORKFLOW_STEPS = ["Sensing", "Policy", "Approval", "Execution", "Audit"] as const;
+
 type ThresholdPresetKey = (typeof THRESHOLD_PRESETS)[number]["key"] | "custom";
 type TradeoffRow = {
-  option: string;
+  option: "Run Local" | "Route" | "Postpone";
   zone: string;
   carbon: string;
   latency: string;
@@ -70,6 +74,8 @@ type TradeoffRow = {
 };
 
 type IntensitySeverity = "clean" | "marginal" | "dirty" | "unknown";
+type UIState = "idle" | "submitting" | "processing" | "awaiting_approval" | "final" | "error";
+type ThemePreference = "system" | "light" | "dark";
 
 const defaultDecision: DecisionResponse = {
   decision_id: "",
@@ -177,9 +183,9 @@ function intensitySeverity(intensity: number | null, threshold: number): Intensi
 }
 
 function intensityClassName(severity: IntensitySeverity): string {
-  if (severity === "clean") return "text-emerald-700";
-  if (severity === "marginal") return "text-amber-700";
-  if (severity === "dirty") return "text-red-700";
+  if (severity === "clean") return "text-emerald-700 dark:text-emerald-400";
+  if (severity === "marginal") return "text-amber-700 dark:text-amber-400";
+  if (severity === "dirty") return "text-red-700 dark:text-red-400";
   return "text-ink";
 }
 
@@ -196,7 +202,7 @@ function geolocationErrorMessage(geoError: GeolocationPositionError): string {
   return `Location unavailable: ${geoError.message || "Unknown geolocation error."}`;
 }
 
-function processingStepLabel(decision: DecisionResponse, uiState: "idle" | "submitting" | "processing" | "awaiting_approval" | "final" | "error"): string | null {
+function processingStepLabel(decision: DecisionResponse, uiState: UIState): string | null {
   if (uiState === "awaiting_approval") return "Awaiting manager decision...";
   if (uiState !== "processing") return null;
   if (decision.timeline.length === 0) return "Initializing decision...";
@@ -206,6 +212,51 @@ function processingStepLabel(decision: DecisionResponse, uiState: "idle" | "subm
   if (stages.has("policy.result")) return "Evaluating policy...";
   if (stages.has("sensor.primary") || stages.has("sensor.candidates")) return "Sensing grid...";
   return "Preparing decision...";
+}
+
+function splitAuditParagraphs(text: string | null): string[] {
+  if (!text) return [];
+  const normalized = text
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+  if (!normalized) return [];
+  const byBlankLine = normalized
+    .split(/\n\s*\n/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  if (byBlankLine.length > 1) return byBlankLine;
+  return normalized
+    .split(/(?<=\.)\s+(?=[A-Z])/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+}
+
+function cleanManagerPrompt(prompt: string): string {
+  let cleaned = prompt.trim();
+  cleaned = cleaned.replace(/Choose:\s*run_local,\s*route,\s*or\s*postpone\.?/gi, "Choose an action below.");
+  cleaned = cleaned.replace(/Choose:\s*run_local\s*or\s*postpone\.?/gi, "Choose an action below.");
+  cleaned = cleaned.replace(/\brun_local\b/g, "run local");
+  cleaned = cleaned.replace(/\broute_to_clean_region\b/g, "route to a cleaner region");
+  cleaned = cleaned.replace(/\brequire_manager_decision\b/g, "manager approval required");
+  return cleaned;
+}
+
+function workflowStepIndex(decision: DecisionResponse, uiState: UIState): number {
+  if (uiState === "idle") return -1;
+  if (uiState === "submitting") return 0;
+  if (uiState === "awaiting_approval") return 2;
+  if (uiState === "final" || uiState === "error") return 4;
+
+  const stages = new Set(decision.timeline.map((event) => event.stage));
+  if (stages.has("audit.generated") || stages.has("timeline.finalized")) return 4;
+  if (stages.has("execution.final")) return 3;
+  if (stages.has("manager.prompted") || stages.has("manager.decision")) return 2;
+  if (stages.has("policy.result")) return 1;
+  if (stages.has("sensor.primary") || stages.has("sensor.candidates")) return 0;
+  return 0;
 }
 
 export default function HomePage() {
@@ -223,13 +274,19 @@ export default function HomePage() {
   const [geoHint, setGeoHint] = useState<string>("");
   const [canRetryGeo, setCanRetryGeo] = useState<boolean>(false);
   const [showIntroModal, setShowIntroModal] = useState<boolean>(false);
+  const [showDemoScenarios, setShowDemoScenarios] = useState<boolean>(false);
+  const [themePreference, setThemePreference] = useState<ThemePreference>("system");
+  const [resolvedTheme, setResolvedTheme] = useState<"light" | "dark">("light");
 
   const [decision, setDecision] = useState<DecisionResponse>(defaultDecision);
   const [decisionId, setDecisionId] = useState<string>("");
-  const [uiState, setUiState] = useState<"idle" | "submitting" | "processing" | "awaiting_approval" | "final" | "error">("idle");
+  const [uiState, setUiState] = useState<UIState>("idle");
   const [error, setError] = useState<string>("");
-  const startedAtRef = useRef<number | null>(null);
+  const [selectedManagerAction, setSelectedManagerAction] = useState<ManagerOption | null>(null);
+  const [armedManagerAction, setArmedManagerAction] = useState<ManagerOption | null>(null);
+  const [lastStartPayload, setLastStartPayload] = useState<StartDecisionRequest | null>(null);
 
+  const startedAtRef = useRef<number | null>(null);
   const shouldPoll = uiState === "processing" && Boolean(decisionId);
 
   useEffect(() => {
@@ -239,12 +296,10 @@ export default function HomePage() {
     const savedApproverName = window.localStorage.getItem(APPROVER_NAME_STORAGE_KEY);
     const savedApproverOrg = window.localStorage.getItem(APPROVER_ORG_STORAGE_KEY);
     const introSeen = window.localStorage.getItem(INTRO_SEEN_STORAGE_KEY);
-    if (savedZone) {
-      setZone(savedZone);
-    }
-    if (savedManagerId) {
-      setManagerId(savedManagerId);
-    }
+    const savedThemePreference = window.localStorage.getItem(THEME_STORAGE_KEY);
+
+    if (savedZone) setZone(savedZone);
+    if (savedManagerId) setManagerId(savedManagerId);
     if (savedApproverName) {
       setApproverName(savedApproverName);
       setShowApproverProfile(true);
@@ -253,8 +308,9 @@ export default function HomePage() {
       setApproverOrg(savedApproverOrg);
       setShowApproverProfile(true);
     }
-    if (!introSeen) {
-      setShowIntroModal(true);
+    if (!introSeen) setShowIntroModal(true);
+    if (savedThemePreference === "light" || savedThemePreference === "dark") {
+      setThemePreference(savedThemePreference);
     }
   }, []);
 
@@ -277,6 +333,46 @@ export default function HomePage() {
     if (typeof window === "undefined") return;
     window.localStorage.setItem(APPROVER_ORG_STORAGE_KEY, approverOrg);
   }, [approverOrg]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+
+    const applyTheme = () => {
+      const shouldUseDark = themePreference === "dark" || (themePreference === "system" && mediaQuery.matches);
+      document.documentElement.classList.toggle("dark", shouldUseDark);
+      setResolvedTheme(shouldUseDark ? "dark" : "light");
+    };
+
+    applyTheme();
+    mediaQuery.addEventListener("change", applyTheme);
+    if (themePreference === "system") {
+      window.localStorage.removeItem(THEME_STORAGE_KEY);
+    } else {
+      window.localStorage.setItem(THEME_STORAGE_KEY, themePreference);
+    }
+
+    return () => mediaQuery.removeEventListener("change", applyTheme);
+  }, [themePreference]);
+
+  useEffect(() => {
+    if (!showIntroModal) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        dismissIntroModal();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showIntroModal]);
+
+  useEffect(() => {
+    if (!armedManagerAction) return;
+    const id = window.setTimeout(() => {
+      setArmedManagerAction(null);
+    }, MANAGER_CONFIRM_TIMEOUT_MS);
+    return () => window.clearTimeout(id);
+  }, [armedManagerAction]);
 
   useEffect(() => {
     if (!shouldPoll) return;
@@ -318,29 +414,42 @@ export default function HomePage() {
     return () => window.clearInterval(id);
   }, [decisionId, shouldPoll]);
 
-  const onStart = async (demoScenario: DemoScenario | null = null) => {
+  const startDecision = async (payload: StartDecisionRequest) => {
     try {
       setUiState("submitting");
       setError("");
       setGeoHint("");
       setCanRetryGeo(false);
       setOverrideReason("");
+      setArmedManagerAction(null);
+      setSelectedManagerAction(null);
 
-      const started = await api.startDecision({
-        estimated_kwh: estimatedKwh,
-        threshold,
-        zone,
-        demo_scenario: demoScenario ?? undefined
-      });
+      const started = await api.startDecision(payload);
 
       setDecision(started);
       setDecisionId(started.decision_id);
       startedAtRef.current = Date.now();
       setUiState("processing");
+      setLastStartPayload(payload);
     } catch (err) {
       setUiState("error");
       setError(err instanceof Error ? err.message : "Unable to start decision");
     }
+  };
+
+  const onStart = async (demoScenario: DemoScenario | null = null) => {
+    const payload: StartDecisionRequest = {
+      estimated_kwh: estimatedKwh,
+      threshold,
+      zone,
+      demo_scenario: demoScenario ?? undefined
+    };
+    await startDecision(payload);
+  };
+
+  const onRetryLastDecision = async () => {
+    if (!lastStartPayload) return;
+    await startDecision(lastStartPayload);
   };
 
   const onResetDecision = () => {
@@ -351,6 +460,8 @@ export default function HomePage() {
     setGeoHint("");
     setCanRetryGeo(false);
     setOverrideReason("");
+    setArmedManagerAction(null);
+    setSelectedManagerAction(null);
     startedAtRef.current = null;
   };
 
@@ -389,19 +500,37 @@ export default function HomePage() {
     );
   };
 
+  const toggleTheme = () => {
+    setThemePreference((current) => {
+      if (current === "system") {
+        return resolvedTheme === "dark" ? "light" : "dark";
+      }
+      return current === "dark" ? "light" : "dark";
+    });
+  };
+
   const recommendedManagerAction: ManagerOption | null = useMemo(() => {
     if (decision.policy_action === "route_to_clean_region") return "route";
     return null;
   }, [decision.policy_action]);
 
-  const onManagerAction = async (option: ManagerOption) => {
+  const selectedActionIsOverride =
+    selectedManagerAction !== null &&
+    recommendedManagerAction !== null &&
+    selectedManagerAction !== recommendedManagerAction;
+
+  const submitManagerAction = async (option: ManagerOption) => {
     if (!decisionId) return;
     const cleanManagerId = managerId.trim();
     const cleanOverrideReason = overrideReason.trim();
     const isOverride = recommendedManagerAction !== null && option !== recommendedManagerAction;
 
     if (!cleanManagerId) {
-      setError("Manager ID is required to submit approval actions.");
+      setError("Approver email is required to submit approval actions.");
+      return;
+    }
+    if (!/.+@.+\..+/.test(cleanManagerId)) {
+      setError("Enter a valid approver email address before submitting approval actions.");
       return;
     }
     if (isOverride && !cleanOverrideReason) {
@@ -412,6 +541,7 @@ export default function HomePage() {
     try {
       setUiState("processing");
       setError("");
+      setArmedManagerAction(null);
 
       let result: DecisionResponse;
       if (option === "run_local") {
@@ -433,6 +563,7 @@ export default function HomePage() {
 
       setDecision(result);
       setOverrideReason("");
+      setSelectedManagerAction(null);
       if (result.status === "completed" || result.status === "postponed") {
         setUiState("final");
       } else if (result.status === "awaiting_approval") {
@@ -447,6 +578,16 @@ export default function HomePage() {
       setUiState("error");
       setError(err instanceof Error ? err.message : "Decision action failed");
     }
+  };
+
+  const onManagerAction = async (option: ManagerOption) => {
+    setSelectedManagerAction(option);
+    if (armedManagerAction !== option) {
+      setArmedManagerAction(option);
+      setError("");
+      return;
+    }
+    await submitManagerAction(option);
   };
 
   const onDownloadAudit = async () => {
@@ -471,6 +612,7 @@ export default function HomePage() {
     if (uiState === "final" || uiState === "error") return decision.status;
     return "processing" as const;
   }, [decision.status, uiState]);
+
   const canDownloadAudit =
     Boolean(decisionId) && (uiState === "final" || decision.status === "completed" || decision.status === "postponed");
 
@@ -486,6 +628,7 @@ export default function HomePage() {
   }, [zone]);
 
   const activeDemoScenario = useMemo(() => activeScenarioFromTimeline(decision), [decision]);
+  const isManagerEmailInvalid = managerId.trim().length > 0 && !/.+@.+\..+/.test(managerId.trim());
   const thresholdPresetDescription = useMemo(() => {
     if (thresholdPreset === "custom") {
       return "Custom threshold. Use policy presets for recommended defaults.";
@@ -493,12 +636,16 @@ export default function HomePage() {
     const selected = THRESHOLD_PRESETS.find((preset) => preset.key === thresholdPreset);
     return selected?.description ?? "Custom threshold.";
   }, [thresholdPreset]);
+
+  const presetMatch = useMemo(() => THRESHOLD_PRESETS.find((preset) => preset.value === threshold) ?? null, [threshold]);
+
   const saved = decision.estimated_kgco2_saved_by_routing ?? 0;
   const isRealized = decision.execution_mode === "routed" && saved > 0;
   const isForegone = decision.execution_mode === "local" && saved > 0;
   const primaryIntensitySeverity = intensitySeverity(decision.primary_intensity, threshold);
   const selectedIntensitySeverity = intensitySeverity(decision.selected_execution_intensity, threshold);
   const activeProcessingStep = processingStepLabel(decision, uiState);
+  const currentWorkflowStepIndex = workflowStepIndex(decision, uiState);
 
   const decisionExplanation = useMemo(() => {
     if (decision.status === "processing") {
@@ -508,9 +655,9 @@ export default function HomePage() {
     }
     if (decision.status === "awaiting_approval") {
       if (decision.policy_action === "route_to_clean_region") {
-        return `Approval required: primary zone is above threshold and routing to ${decision.selected_execution_zone ?? "a cleaner zone"} is available.`;
+        return `${decision.primary_zone} exceeds the configured threshold. A cleaner route is available via ${decision.selected_execution_zone ?? "a candidate zone"}. Review the decision briefing and choose an action.`;
       }
-      return "Approval required: primary zone is above threshold and no compliant route is currently available.";
+      return `${decision.primary_zone} exceeds the configured threshold and no compliant route is currently available. Review the briefing and choose run local or postpone.`;
     }
     if (decision.status === "error") {
       return decision.error || "Decision failed during workflow execution.";
@@ -542,9 +689,9 @@ export default function HomePage() {
     const routedCarbon = decision.estimated_kgco2_routed !== null ? `${decision.estimated_kgco2_routed}` : "N/A";
     const sameCountryLocal = countryLabelFromZone(localZone);
     const routeResidency = routeZone
-      ? (countryCodeFromZone(routeZone) === countryCodeFromZone(localZone)
+      ? countryCodeFromZone(routeZone) === countryCodeFromZone(localZone)
         ? `Same-country (${countryLabelFromZone(routeZone)})`
-        : `Cross-border (${countryLabelFromZone(routeZone)})`)
+        : `Cross-border (${countryLabelFromZone(routeZone)})`
       : "Not available";
 
     return [
@@ -575,6 +722,22 @@ export default function HomePage() {
     ];
   }, [decision, zone]);
 
+  const chosenTradeoffOption: TradeoffRow["option"] | null =
+    decision.execution_mode === "local"
+      ? "Run Local"
+      : decision.execution_mode === "routed"
+        ? "Route"
+        : decision.execution_mode === "postponed"
+          ? "Postpone"
+          : null;
+
+  const hasDecision = Boolean(decisionId);
+  const showLiveControls = uiState === "idle" || uiState === "submitting" || uiState === "processing";
+  const showFinalControls = uiState === "final";
+  const showErrorControls = uiState === "error";
+  const showApprovalControls = uiState === "awaiting_approval";
+  const auditParagraphs = splitAuditParagraphs(decision.audit_report);
+
   return (
     <main className="px-4 py-8 md:px-8">
       <div className="mx-auto max-w-6xl space-y-6">
@@ -589,6 +752,13 @@ export default function HomePage() {
               <p className="mt-2 text-xs uppercase tracking-[0.15em] text-fern">Forecast Mode: Disabled (Routing-First)</p>
             </div>
             <div className="flex items-center gap-2">
+              <button
+                type="button"
+                className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
+                onClick={toggleTheme}
+              >
+                {resolvedTheme === "dark" ? "Light Mode" : "Dark Mode"}
+              </button>
               <button
                 type="button"
                 className="rounded-full border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
@@ -654,7 +824,14 @@ export default function HomePage() {
                 ))}
                 <option value="custom">Custom</option>
               </select>
-              <p className="text-xs text-fern">{thresholdPresetDescription}</p>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-fern">
+                <span>{thresholdPresetDescription}</span>
+                {presetMatch && (
+                  <span className="rounded-full border border-emerald-300 bg-emerald-50 px-2 py-0.5 font-semibold text-emerald-700 dark:border-emerald-800 dark:bg-emerald-900/30 dark:text-emerald-300">
+                    Preset match: {presetMatch.label}
+                  </span>
+                )}
+              </div>
             </label>
             <label className="space-y-2 md:col-span-1">
               <span className="text-sm font-semibold text-ink">Primary Grid Zone</span>
@@ -710,24 +887,33 @@ export default function HomePage() {
 
           <div className="mt-5 grid gap-4 md:grid-cols-2">
             <label className="space-y-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-fern">Manager ID (required for approvals)</span>
+              <span className="text-xs font-semibold uppercase tracking-wide text-fern">Approver Email (required for approvals)</span>
+              <span className="block text-xs text-fern">Stored in the backend audit trail when governance actions are submitted.</span>
               <input
-                className="w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
+                className={`w-full rounded-xl border bg-white px-4 py-3 text-sm text-ink shadow-sm ${
+                  isManagerEmailInvalid ? "border-red-400 dark:border-red-700" : "border-moss/30"
+                }`}
                 type="text"
                 value={managerId}
                 onChange={(e) => setManagerId(e.target.value)}
                 placeholder="name@company.com"
               />
+              {isManagerEmailInvalid && <span className="block text-xs text-red-600 dark:text-red-400">Enter a valid email format.</span>}
             </label>
             <div className="space-y-2">
-              <button
-                type="button"
-                className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
-                onClick={() => setShowApproverProfile((value) => !value)}
-              >
-                {showApproverProfile ? "Hide Approver Profile" : "Show Approver Profile"}
-              </button>
-              <p className="text-xs text-fern">Local-only metadata for demo context. Not sent to backend.</p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
+                  onClick={() => setShowApproverProfile((value) => !value)}
+                >
+                  {showApproverProfile ? "Hide Approver Profile" : "Show Approver Profile"}
+                </button>
+                <span className="rounded-full border border-sky-300 bg-sky-50 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-sky-700 dark:border-sky-800 dark:bg-sky-900/30 dark:text-sky-300">
+                  Client-side only
+                </span>
+              </div>
+              <p className="text-sm text-fern">Local context fields help demo storytelling. They are never sent to backend APIs.</p>
             </div>
           </div>
 
@@ -756,315 +942,498 @@ export default function HomePage() {
             </div>
           )}
 
-          <div className="mt-6 flex flex-wrap gap-3">
-            <button
-              className="rounded-xl bg-ink px-6 py-3 text-sm font-semibold text-white transition hover:bg-fern disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => onStart()}
-              disabled={uiState === "submitting" || uiState === "processing"}
-            >
-              {uiState === "submitting" ? "Starting..." : "Evaluate and decide (Live)"}
-            </button>
-            <button
-              className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => onStart("clean_local")}
-              disabled={uiState === "submitting" || uiState === "processing"}
-            >
-              Force Clean Path
-            </button>
-            <button
-              className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => onStart("routeable_dirty")}
-              disabled={uiState === "submitting" || uiState === "processing"}
-            >
-              Force Route Path
-            </button>
-            <button
-              className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
-              onClick={() => onStart("non_routeable_dirty")}
-              disabled={uiState === "submitting" || uiState === "processing"}
-            >
-              Force Approval Path
-            </button>
-            {(uiState === "final" || uiState === "error") && (
-              <button
-                className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10"
-                onClick={onResetDecision}
-              >
-                New Decision
-              </button>
-            )}
-            {uiState === "awaiting_approval" &&
-              decision.manager_options.map((option) => (
+          <div className="mt-6 space-y-4">
+            {showLiveControls && (
+              <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-moss/25 bg-moss/5 p-4">
                 <button
-                  key={option}
-                  className="rounded-xl border border-fern px-6 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10"
-                  onClick={() => onManagerAction(option)}
+                  className="rounded-xl border border-transparent bg-[#1f5f3f] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[#2b7a52] disabled:cursor-not-allowed disabled:bg-[#7fae97] disabled:text-white/85 dark:bg-emerald-400 dark:text-[#04120a] dark:hover:bg-emerald-300 dark:disabled:border-zinc-600 dark:disabled:bg-zinc-700 dark:disabled:text-zinc-300"
+                  onClick={() => void onStart()}
+                  disabled={uiState === "submitting" || uiState === "processing"}
                 >
-                  {managerLabel(option, decision.selected_execution_zone)}
+                  {uiState === "submitting" ? "Starting..." : "Evaluate and decide (Live)"}
                 </button>
-              ))}
-            <button
-              className="rounded-xl bg-ember px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-              onClick={onDownloadAudit}
-              disabled={!canDownloadAudit}
-            >
-              Download Audit CSV
-            </button>
-          </div>
-          {uiState === "awaiting_approval" && (
-            <div className="mt-4 grid gap-3">
-              <label className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-fern">
-                  Override Reason (required only for policy override)
-                </span>
-                <textarea
-                  className="min-h-20 w-full rounded-xl border border-moss/30 bg-white px-4 py-3 text-sm text-ink shadow-sm"
-                  value={overrideReason}
-                  onChange={(e) => setOverrideReason(e.target.value)}
-                  placeholder={
-                    recommendedManagerAction === "route"
-                      ? "Required if choosing Run Local or Postpone instead of Route."
-                      : "Optional"
-                  }
-                />
-              </label>
-            </div>
-          )}
-          <p className="mt-3 text-xs text-fern">
-            Demo buttons use deterministic synthetic intensities to guarantee interview-ready outcomes.
-          </p>
-
-          {decisionId && (
-            <p className="mt-4 text-xs text-fern">
-              Decision ID: <span className="font-mono">{decisionId}</span>
-            </p>
-          )}
-          {decisionId && (
-            <p className="mt-2 text-xs uppercase tracking-wide text-fern">
-              Run mode: {activeDemoScenario ? DEMO_SCENARIO_LABELS[activeDemoScenario] : "Live API"}
-            </p>
-          )}
-          {decisionId && activeProcessingStep && (
-            <p className="mt-2 text-xs font-semibold uppercase tracking-wide text-fern">
-              Step: {activeProcessingStep}
-            </p>
-          )}
-          {decisionId && (
-            <p className="mt-3 rounded-lg border border-moss/30 bg-moss/5 px-3 py-2 text-sm text-ink">{decisionExplanation}</p>
-          )}
-          {decision.manager_prompt && uiState === "awaiting_approval" && (
-            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800">
-              {decision.manager_prompt}
-            </p>
-          )}
-          {error && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700">{error}</p>}
-        </section>
-
-        <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-          <article className="panel-strong rounded-2xl p-4">
-            <p className="text-xs uppercase tracking-[0.14em] text-fern">Primary Zone Intensity</p>
-            <p className={`mt-2 text-2xl font-bold ${intensityClassName(primaryIntensitySeverity)}`}>{decision.primary_intensity ?? "-"}</p>
-            <p className="text-sm text-fern">gCO2eq/kWh</p>
-          </article>
-          <article className="panel-strong rounded-2xl p-4">
-            <p className="text-xs uppercase tracking-[0.14em] text-fern">Selected Execution Zone</p>
-            <p className="mt-2 text-2xl font-bold text-ink">{decision.selected_execution_zone ?? "-"}</p>
-            <p className={`text-sm ${intensityClassName(selectedIntensitySeverity)}`}>{decision.selected_execution_intensity ?? "-"} gCO2eq/kWh</p>
-          </article>
-          <article className="panel-strong rounded-2xl p-4">
-            <p className="text-xs uppercase tracking-[0.14em] text-fern">Execution Mode</p>
-            <p className="mt-2 text-2xl font-bold text-ink">{decision.execution_mode ?? "-"}</p>
-            <p className="text-sm text-fern">local / routed / postponed</p>
-          </article>
-          <article
-            className={`rounded-2xl p-4 ${
-              isRealized
-                ? "border border-emerald-200 bg-emerald-50"
-                : isForegone
-                  ? "border border-amber-200 bg-amber-50"
-                  : "panel-strong"
-            }`}
-          >
-            <p
-              className={`text-xs uppercase tracking-[0.14em] ${
-                isRealized ? "text-emerald-700" : isForegone ? "text-amber-700" : "text-fern"
-              }`}
-            >
-              {isForegone ? "Foregone Savings" : "Routing Savings"}
-            </p>
-            <p
-              className={`mt-2 text-2xl font-bold ${
-                isRealized ? "text-emerald-800" : isForegone ? "text-amber-800" : "text-ink"
-              }`}
-            >
-              {decision.estimated_kgco2_saved_by_routing ?? "-"}
-            </p>
-            <p
-              className={`text-sm ${
-                isRealized ? "text-emerald-600" : isForegone ? "text-amber-600" : "text-fern"
-              }`}
-            >
-              kgCO2
-            </p>
-          </article>
-        </section>
-
-        <section className="grid gap-4 lg:grid-cols-2">
-          <article className="panel-strong rounded-2xl p-5">
-            <h2 className="text-lg font-bold text-ink">Policy Decision</h2>
-            <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-fern">
-              <span className="font-semibold text-ink">Action:</span>
-              <PolicyActionBadge action={decision.policy_action} />
-              <span className="font-mono text-xs text-fern/80">{decision.policy_action ?? "pending"}</span>
-            </div>
-            <p className="mt-2 text-sm text-fern">
-              <span className="font-semibold text-ink">Reason:</span> {decision.policy_reason ?? "Waiting for evaluation..."}
-            </p>
-            <p className="mt-2 text-sm text-fern">
-              <span className="font-semibold text-ink">Estimated Local:</span> {decision.estimated_kgco2_local ?? "-"} kgCO2
-            </p>
-            <p className="mt-2 text-sm text-fern">
-              <span className="font-semibold text-ink">Estimated Routed:</span> {decision.estimated_kgco2_routed ?? "-"} kgCO2
-            </p>
-            <p className="mt-2 text-sm text-fern">
-              <span className="font-semibold text-ink">Accounting Method:</span> {decision.accounting_method}
-            </p>
-            <p className="mt-2 text-sm text-fern">
-              <span className="font-semibold text-ink">Manager ID:</span> {decision.manager_id ?? "N/A"}
-            </p>
-            <p className="mt-2 text-sm text-fern">
-              <span className="font-semibold text-ink">Override Reason:</span> {decision.override_reason ?? "N/A"}
-            </p>
-          </article>
-
-          <article className="panel-strong rounded-2xl p-5">
-            <h2 className="text-lg font-bold text-ink">Audit Report</h2>
-            <p className="mt-2 text-xs uppercase tracking-wide text-fern">Mode: {decision.audit_mode ?? "pending"}</p>
-            <p className="mt-3 whitespace-pre-wrap text-sm text-ink">
-              {decision.audit_report ?? "Audit report appears when workflow reaches completion."}
-            </p>
-          </article>
-        </section>
-
-        <section className="panel-strong rounded-2xl p-5">
-          <h2 className="text-lg font-bold text-ink">Execution Tradeoff Comparison</h2>
-          <p className="mt-2 text-xs text-fern">
-            Compares operational options on emissions, latency, residency, and estimated cost impact.
-          </p>
-          <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
-            <table className="min-w-full divide-y divide-moss/20 text-sm">
-              <thead className="bg-moss/10 text-left">
-                <tr>
-                  <th className="px-4 py-3 font-semibold text-ink">Option</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Zone</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Carbon (kgCO2)</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Est. Latency</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Data Residency</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Cost Impact</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-moss/10 bg-white/70">
-                {tradeoffRows.map((row) => (
-                  <tr key={row.option}>
-                    <td className="px-4 py-3 font-semibold text-ink">{row.option}</td>
-                    <td className="px-4 py-3 text-ink">{row.zone}</td>
-                    <td className="px-4 py-3 text-ink">{row.carbon}</td>
-                    <td className="px-4 py-3 text-ink">{row.latency}</td>
-                    <td className="px-4 py-3 text-ink">{row.dataResidency}</td>
-                    <td className="px-4 py-3 text-ink">{row.costImpact}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {decision.execution_mode === "postponed" && (
-            <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900">
-              {decision.forecast_available && decision.forecast_recommendation ? (
-                <>
-                  <span className="font-semibold">Forecast guidance:</span>{" "}
-                  {decision.forecast_recommendation}
-                </>
-              ) : (
-                "No forecast guidance available — check back manually."
-              )}
-            </div>
-          )}
-        </section>
-
-        <section className="panel-strong rounded-2xl p-5">
-          <h2 className="text-lg font-bold text-ink">Top 3 Cleanest Candidate Zones</h2>
-          <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
-            <table className="min-w-full divide-y divide-moss/20 text-sm">
-              <thead className="bg-moss/10 text-left">
-                <tr>
-                  <th className="px-4 py-3 font-semibold text-ink">Zone</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Intensity (gCO2eq/kWh)</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Updated</th>
-                  <th className="px-4 py-3 font-semibold text-ink">Status</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-moss/10 bg-white/70">
-                {decision.routing_top3.length > 0 ? (
-                  decision.routing_top3.map((candidate) => (
-                    <tr key={`${candidate.zone}-${candidate.datetime ?? "none"}`}>
-                      <td className="px-4 py-3 text-ink">{candidate.zone}</td>
-                      <td className="px-4 py-3 font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
-                      <td className="px-4 py-3 text-ink">{formatTimestamp(candidate.datetime)}</td>
-                      <td className="px-4 py-3 text-ink">{candidate.ok ? "OK" : `Error: ${candidate.error ?? "unknown"}`}</td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td className="px-4 py-6 text-fern" colSpan={4}>
-                      No routing candidates available yet.
-                    </td>
-                  </tr>
+                {(uiState === "idle" || uiState === "submitting") && (
+                  <button
+                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => setShowDemoScenarios((value) => !value)}
+                    disabled={uiState === "submitting"}
+                  >
+                    {showDemoScenarios ? "Hide Demo Scenarios" : "Show Demo Scenarios"}
+                  </button>
                 )}
-              </tbody>
-            </table>
+              </div>
+            )}
+
+            {(uiState === "idle" || uiState === "submitting") && showDemoScenarios && (
+              <div className="rounded-2xl border border-dashed border-fern/35 bg-white/60 p-4 dark:bg-zinc-900/60">
+                <p className="text-xs font-semibold uppercase tracking-wide text-fern">Demo Scenarios</p>
+                <p className="mt-1 text-xs text-fern">Deterministic scenarios for interview-ready outcomes.</p>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  <button
+                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => void onStart("clean_local")}
+                    disabled={uiState === "submitting"}
+                  >
+                    {DEMO_SCENARIO_LABELS.clean_local}
+                  </button>
+                  <button
+                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => void onStart("routeable_dirty")}
+                    disabled={uiState === "submitting"}
+                  >
+                    {DEMO_SCENARIO_LABELS.routeable_dirty}
+                  </button>
+                  <button
+                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    onClick={() => void onStart("non_routeable_dirty")}
+                    disabled={uiState === "submitting"}
+                  >
+                    {DEMO_SCENARIO_LABELS.non_routeable_dirty}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {showApprovalControls && (
+              <div className="rounded-2xl border border-amber-200 bg-amber-50/70 p-4 dark:border-amber-900 dark:bg-amber-900/20">
+                <p className="text-xs font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">Manager Approval Required</p>
+                <div className="mt-3 rounded-xl border border-moss/25 bg-white/80 p-3 text-sm text-ink dark:border-moss/40 dark:bg-zinc-900/65">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-fern">Decision Briefing</p>
+                  <p className="mt-2 text-sm text-fern">
+                    Primary zone <span className="font-semibold text-ink">{decision.primary_zone}</span> is at{" "}
+                    <span className="font-semibold text-ink">{decision.primary_intensity ?? "-"}</span> gCO2eq/kWh against threshold{" "}
+                    <span className="font-semibold text-ink">{threshold}</span>.
+                  </p>
+                  {decision.policy_action === "route_to_clean_region" ? (
+                    <p className="mt-1 text-sm text-fern">
+                      Cleaner route available: <span className="font-semibold text-ink">{decision.selected_execution_zone ?? "-"}</span> at{" "}
+                      <span className="font-semibold text-ink">{decision.selected_execution_intensity ?? "-"}</span> gCO2eq/kWh.
+                    </p>
+                  ) : (
+                    <p className="mt-1 text-sm text-fern">No compliant route candidate is currently available under this threshold.</p>
+                  )}
+                  <div className="mt-2 grid gap-2 sm:grid-cols-3">
+                    <p className="text-xs text-fern">
+                      Local estimate: <span className="font-semibold text-ink">{decision.estimated_kgco2_local ?? "-"}</span> kgCO2
+                    </p>
+                    <p className="text-xs text-fern">
+                      Routed estimate: <span className="font-semibold text-ink">{decision.estimated_kgco2_routed ?? "-"}</span> kgCO2
+                    </p>
+                    <p className="text-xs text-fern">
+                      Potential savings: <span className="font-semibold text-ink">{decision.estimated_kgco2_saved_by_routing ?? "-"}</span> kgCO2
+                    </p>
+                  </div>
+                </div>
+                <div className="mt-3 flex flex-wrap gap-3">
+                  {decision.manager_options.map((option) => {
+                    const isArmed = armedManagerAction === option;
+                    const label = managerLabel(option, decision.selected_execution_zone);
+                    return (
+                      <button
+                        key={option}
+                        className={`rounded-xl border px-6 py-3 text-sm font-semibold transition ${
+                          isArmed
+                            ? "border-amber-500 bg-amber-100 text-amber-900 hover:bg-amber-200 dark:border-amber-500 dark:bg-amber-900/40 dark:text-amber-200"
+                            : "border-fern text-fern hover:bg-fern/10"
+                        }`}
+                        onClick={() => void onManagerAction(option)}
+                        aria-label={`Manager action: ${label}`}
+                      >
+                        {isArmed ? `Confirm: ${label}` : label}
+                      </button>
+                    );
+                  })}
+                </div>
+                {armedManagerAction && (
+                  <p className="mt-3 text-xs text-amber-800 dark:text-amber-300">
+                    Click the same action again within {MANAGER_CONFIRM_TIMEOUT_MS / 1000}s to confirm.
+                  </p>
+                )}
+
+                {selectedActionIsOverride && (
+                  <div className="mt-4 grid gap-3">
+                    <label className="space-y-2">
+                      <span className="text-xs font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">
+                        Override Reason (required)
+                      </span>
+                      <textarea
+                        className="min-h-20 w-full rounded-xl border border-amber-300 bg-white px-4 py-3 text-sm text-ink shadow-sm dark:border-amber-800"
+                        value={overrideReason}
+                        onChange={(e) => setOverrideReason(e.target.value)}
+                        placeholder="This action overrides the policy recommendation. Provide justification."
+                      />
+                    </label>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {showFinalControls && (
+              <div className="flex flex-wrap gap-3">
+                <button
+                  className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10 dark:hover:bg-zinc-800/70"
+                  onClick={onResetDecision}
+                >
+                  New Decision
+                </button>
+                <button
+                  className="rounded-xl bg-ember px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  onClick={() => void onDownloadAudit()}
+                  disabled={!canDownloadAudit}
+                >
+                  Download Audit CSV
+                </button>
+              </div>
+            )}
+
+            {showErrorControls && (
+              <div className="flex flex-wrap gap-3">
+                <button
+                  className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10 disabled:opacity-50 dark:hover:bg-zinc-800/70"
+                  onClick={() => void onRetryLastDecision()}
+                  disabled={!lastStartPayload}
+                >
+                  Retry Last Decision
+                </button>
+                <button
+                  className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10 dark:hover:bg-zinc-800/70"
+                  onClick={onResetDecision}
+                >
+                  New Decision
+                </button>
+              </div>
+            )}
           </div>
+
+          {hasDecision ? (
+            <>
+              <p className="mt-3 text-xs text-fern">Demo scenarios use deterministic synthetic intensities to guarantee interview-ready outcomes.</p>
+              <p className="mt-4 text-xs text-fern">
+                Decision ID: <span className="font-mono">{decisionId}</span>
+              </p>
+              <p className="mt-2 text-xs uppercase tracking-wide text-fern">
+                Run mode: {activeDemoScenario ? DEMO_SCENARIO_LABELS[activeDemoScenario] : "Live API"}
+              </p>
+
+              <div className="mt-4 rounded-xl border border-moss/25 bg-white/60 p-4 dark:bg-zinc-900/60">
+                <ol className="grid gap-2 md:grid-cols-5">
+                  {WORKFLOW_STEPS.map((step, index) => {
+                    const isComplete = currentWorkflowStepIndex > index;
+                    const isActive = currentWorkflowStepIndex === index;
+                    return (
+                      <li key={step} className="flex items-center gap-2">
+                        <span
+                          className={`inline-flex h-6 w-6 items-center justify-center rounded-full border text-xs font-bold ${
+                            isComplete
+                              ? "border-emerald-500 bg-emerald-500 text-white"
+                              : isActive
+                                ? "border-amber-500 bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
+                                : "border-moss/40 bg-white/70 text-fern dark:bg-zinc-800/70"
+                          }`}
+                        >
+                          {index + 1}
+                        </span>
+                        <span className={`text-xs font-semibold ${isActive ? "text-ink" : "text-fern"}`}>{step}</span>
+                      </li>
+                    );
+                  })}
+                </ol>
+                {activeProcessingStep && (
+                  <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-fern">Step: {activeProcessingStep}</p>
+                )}
+              </div>
+
+              <p className="mt-3 rounded-lg border border-moss/30 bg-moss/5 px-3 py-2 text-sm text-ink">{decisionExplanation}</p>
+              {decision.manager_prompt && uiState === "awaiting_approval" && (
+                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-900/20 dark:text-amber-300">
+                  {cleanManagerPrompt(decision.manager_prompt)}
+                </p>
+              )}
+            </>
+          ) : (
+            <p className="mt-4 text-sm text-fern">Start a live or demo decision to populate metrics, policy output, tradeoffs, and timeline.</p>
+          )}
+
+          {error && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-300">{error}</p>}
         </section>
 
-        <section className="panel-strong rounded-2xl p-5">
-          <h2 className="text-lg font-bold text-ink">Decision Replay Timeline</h2>
-          {decision.timeline.length === 0 ? (
-            <p className="mt-3 text-sm text-fern">Timeline appears as the workflow executes.</p>
-          ) : (
-            <div className="mt-4 space-y-3">
-              {decision.timeline.map((event, index) => (
-                <details key={`${event.ts}-${event.stage}-${index}`} className="rounded-xl border border-moss/20 bg-white/70 px-4 py-3">
-                  <summary className="cursor-pointer text-sm font-semibold text-ink">
-                    {formatTimestamp(event.ts)} | {event.stage} | {event.message}
-                  </summary>
-                  <pre className="mt-3 overflow-x-auto rounded bg-slate-100 p-3 text-xs text-slate-700">
-                    {JSON.stringify(event.data, null, 2)}
-                  </pre>
-                </details>
-              ))}
-            </div>
-          )}
-        </section>
+        {hasDecision && (
+          <>
+            <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+              <article className="panel-strong rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-[0.14em] text-fern">Primary Zone Intensity</p>
+                <div className="mt-2 min-h-9">
+                  {uiState === "processing" && decision.primary_intensity === null ? (
+                    <span className="inline-block h-8 w-20 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
+                  ) : (
+                    <p className={`text-2xl font-bold ${intensityClassName(primaryIntensitySeverity)}`}>{decision.primary_intensity ?? "-"}</p>
+                  )}
+                </div>
+                <p className="text-sm text-fern">gCO2eq/kWh</p>
+              </article>
+              <article className="panel-strong rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-[0.14em] text-fern">Selected Execution Zone</p>
+                <div className="mt-2 min-h-9">
+                  {uiState === "processing" && decision.selected_execution_zone === null ? (
+                    <span className="inline-block h-8 w-24 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
+                  ) : (
+                    <p className="text-2xl font-bold text-ink">{decision.selected_execution_zone ?? "-"}</p>
+                  )}
+                </div>
+                <p className={`text-sm ${intensityClassName(selectedIntensitySeverity)}`}>{decision.selected_execution_intensity ?? "-"} gCO2eq/kWh</p>
+              </article>
+              <article className="panel-strong rounded-2xl p-4">
+                <p className="text-xs uppercase tracking-[0.14em] text-fern">Execution Mode</p>
+                <div className="mt-2 min-h-9">
+                  {uiState === "processing" && decision.execution_mode === null ? (
+                    <span className="inline-block h-8 w-16 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
+                  ) : (
+                    <p className="text-2xl font-bold text-ink">{decision.execution_mode ?? "-"}</p>
+                  )}
+                </div>
+                <p className="text-sm text-fern">local / routed / postponed</p>
+              </article>
+              <article
+                className={`rounded-2xl p-4 ${
+                  isRealized
+                    ? "border border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-900/20"
+                    : isForegone
+                      ? "border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-900/20"
+                      : "panel-strong"
+                }`}
+              >
+                <p
+                  className={`text-xs uppercase tracking-[0.14em] ${
+                    isRealized ? "text-emerald-700 dark:text-emerald-300" : isForegone ? "text-amber-700 dark:text-amber-300" : "text-fern"
+                  }`}
+                >
+                  {isForegone ? "Foregone Savings" : "Routing Savings"}
+                </p>
+                <div className="mt-2 min-h-9">
+                  {uiState === "processing" && decision.estimated_kgco2_saved_by_routing === null ? (
+                    <span className="inline-block h-8 w-20 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
+                  ) : (
+                    <p
+                      className={`text-2xl font-bold ${
+                        isRealized ? "text-emerald-800 dark:text-emerald-300" : isForegone ? "text-amber-800 dark:text-amber-300" : "text-ink"
+                      }`}
+                    >
+                      {decision.estimated_kgco2_saved_by_routing ?? "-"}
+                    </p>
+                  )}
+                </div>
+                <p className={`text-sm ${isRealized ? "text-emerald-600 dark:text-emerald-300" : isForegone ? "text-amber-600 dark:text-amber-300" : "text-fern"}`}>
+                  kgCO2
+                </p>
+              </article>
+            </section>
+
+            <section className="grid gap-4 lg:grid-cols-2">
+              <article className="panel-strong rounded-2xl p-5">
+                <h2 className="text-lg font-bold text-ink">Policy Decision</h2>
+                <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-fern">
+                  <span className="font-semibold text-ink">Action:</span>
+                  <PolicyActionBadge action={decision.policy_action} />
+                </div>
+                <p className="mt-2 text-sm text-fern">
+                  <span className="font-semibold text-ink">Reason:</span> {decision.policy_reason ?? "Waiting for evaluation..."}
+                </p>
+                <p className="mt-2 text-sm text-fern">
+                  <span className="font-semibold text-ink">Estimated Local:</span> {decision.estimated_kgco2_local ?? "-"} kgCO2
+                </p>
+                <p className="mt-2 text-sm text-fern">
+                  <span className="font-semibold text-ink">Estimated Routed:</span> {decision.estimated_kgco2_routed ?? "-"} kgCO2
+                </p>
+                <p className="mt-2 text-sm text-fern">
+                  <span className="font-semibold text-ink">Accounting Method:</span> {decision.accounting_method}
+                </p>
+                <p className="mt-2 text-sm text-fern">
+                  <span className="font-semibold text-ink">Approver Email:</span> {decision.manager_id ?? "N/A"}
+                </p>
+                <p className="mt-2 text-sm text-fern">
+                  <span className="font-semibold text-ink">Override Reason:</span> {decision.override_reason ?? "N/A"}
+                </p>
+                <p className="mt-3 rounded-md border border-moss/30 bg-moss/10 px-2 py-1 text-xs text-fern dark:bg-moss/20">
+                  Estimates use point-in-time intensity; actual emissions depend on job duration.
+                </p>
+              </article>
+
+              <article className="panel-strong rounded-2xl p-5">
+                <h2 className="text-lg font-bold text-ink">Audit Report</h2>
+                <p className="mt-2 text-xs uppercase tracking-wide text-fern">Mode: {decision.audit_mode ?? "pending"}</p>
+                {auditParagraphs.length > 0 ? (
+                  <div className="mt-3 space-y-3 text-sm text-ink">
+                    {auditParagraphs.map((paragraph, idx) => (
+                      <p key={`${idx}-${paragraph.slice(0, 20)}`}>{paragraph}</p>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="mt-3 whitespace-pre-wrap text-sm text-ink">Audit report appears when workflow reaches completion.</p>
+                )}
+              </article>
+            </section>
+
+            <section className="panel-strong rounded-2xl p-5">
+              <h2 className="text-lg font-bold text-ink">Execution Tradeoff Comparison</h2>
+              <p className="mt-2 text-xs text-fern">
+                Compares operational options on emissions, latency, residency, and estimated cost impact.
+              </p>
+              <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
+                <table className="min-w-full divide-y divide-moss/20 text-sm">
+                  <thead className="bg-moss/10 text-left">
+                    <tr>
+                      <th className="px-4 py-3 font-semibold text-ink">Option</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Zone</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Carbon (kgCO2)</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Est. Latency</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Data Residency</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Cost Impact</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-moss/10 bg-white/70 dark:bg-zinc-900/60">
+                    {tradeoffRows.map((row) => {
+                      const selected = chosenTradeoffOption === row.option;
+                      return (
+                        <tr key={row.option} className={selected ? "bg-emerald-50/70 dark:bg-emerald-900/20" : ""}>
+                          <td className={`px-4 py-3 font-semibold text-ink ${selected ? "border-l-4 border-emerald-500" : ""}`}>{row.option}</td>
+                          <td className="px-4 py-3 text-ink">{row.zone}</td>
+                          <td className="px-4 py-3 text-ink">{row.carbon}</td>
+                          <td className="px-4 py-3 text-ink">{row.latency}</td>
+                          <td className="px-4 py-3 text-ink">{row.dataResidency}</td>
+                          <td className="px-4 py-3 text-ink">{row.costImpact}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {decision.execution_mode === "postponed" && (
+                <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-900/20 dark:text-sky-200">
+                  {decision.forecast_available && decision.forecast_recommendation ? (
+                    <>
+                      <span className="font-semibold">Forecast guidance:</span> {decision.forecast_recommendation}
+                    </>
+                  ) : (
+                    "No forecast guidance available — check back manually."
+                  )}
+                </div>
+              )}
+            </section>
+
+            <section className="panel-strong rounded-2xl p-5">
+              <h2 className="text-lg font-bold text-ink">Top 3 Cleanest Candidate Zones</h2>
+              <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
+                <table className="min-w-full divide-y divide-moss/20 text-sm">
+                  <thead className="bg-moss/10 text-left">
+                    <tr>
+                      <th className="px-4 py-3 font-semibold text-ink">Zone</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Intensity (gCO2eq/kWh)</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Updated</th>
+                      <th className="px-4 py-3 font-semibold text-ink">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-moss/10 bg-white/70 dark:bg-zinc-900/60">
+                    {decision.routing_top3.length > 0 ? (
+                      decision.routing_top3.map((candidate) => (
+                        <tr key={`${candidate.zone}-${candidate.datetime ?? "none"}`}>
+                          <td className="px-4 py-3 text-ink">{candidate.zone}</td>
+                          <td className="px-4 py-3 font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
+                          <td className="px-4 py-3 text-ink">{formatTimestamp(candidate.datetime)}</td>
+                          <td className="px-4 py-3 text-ink">{candidate.ok ? "OK" : `Error: ${candidate.error ?? "unknown"}`}</td>
+                        </tr>
+                      ))
+                    ) : (
+                      <tr>
+                        <td className="px-4 py-6 text-fern" colSpan={4}>
+                          No routing candidates available yet.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </section>
+
+            <section className="panel-strong rounded-2xl p-5">
+              <h2 className="text-lg font-bold text-ink">Decision Replay Timeline</h2>
+              {decision.timeline.length === 0 ? (
+                <p className="mt-3 text-sm text-fern">Timeline appears as the workflow executes.</p>
+              ) : (
+                <div className="mt-4 space-y-3">
+                  {decision.timeline.map((event, index) => (
+                    <details
+                      key={`${event.ts}-${event.stage}-${index}`}
+                      open={index === decision.timeline.length - 1}
+                      className="rounded-xl border border-moss/20 bg-white/70 px-4 py-3 dark:bg-zinc-900/60"
+                    >
+                      <summary className="cursor-pointer text-sm font-semibold text-ink">
+                        {formatTimestamp(event.ts)} | {event.stage} | {event.message}
+                      </summary>
+                      {event.data && Object.keys(event.data).length > 0 && (
+                        <details className="mt-3 rounded border border-moss/20 bg-slate-50 dark:bg-zinc-900/80">
+                          <summary className="cursor-pointer px-3 py-2 text-xs font-semibold uppercase tracking-wide text-fern">
+                            Show technical details
+                          </summary>
+                          <pre className="overflow-x-auto border-t border-moss/20 px-3 py-3 text-xs text-slate-700 dark:text-slate-200">
+                            {JSON.stringify(event.data, null, 2)}
+                          </pre>
+                        </details>
+                      )}
+                    </details>
+                  ))}
+                </div>
+              )}
+            </section>
+          </>
+        )}
       </div>
+
       {showIntroModal && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-2xl rounded-2xl border border-moss/20 bg-white p-6 shadow-2xl">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Welcome to Carbon-Aware Compute Advisor"
+            className="panel-strong w-full max-w-2xl rounded-2xl p-6 shadow-2xl"
+          >
             <h2 className="text-xl font-bold text-ink">Welcome to Carbon-Aware Compute Advisor</h2>
-            <p className="mt-2 text-sm text-fern">
-              This dashboard decides whether compute workloads should run locally, route to a cleaner region, or be escalated for manager approval.
-            </p>
-            <div className="mt-4 space-y-3 text-sm text-fern">
-              <p>
-                <span className="font-semibold text-ink">Inputs:</span> Estimated Job Energy drives emissions math, Carbon Threshold sets policy strictness, and
-                Primary Grid Zone is the origin region for execution.
-              </p>
-              <p>
-                <span className="font-semibold text-ink">Actions:</span> Evaluate Live uses real API signals. Force buttons run deterministic scenarios for demo flows
-                (clean, routeable dirty, non-routeable dirty).
-              </p>
-              <p>
-                <span className="font-semibold text-ink">Governance:</span> Dirty scenarios can require manager decisions (`run_local`, `route`, `postpone`) with
-                auditable reasoning and CSV export.
-              </p>
+            <div className="mt-4 space-y-4 text-sm text-fern">
+              <div>
+                <p className="font-semibold text-ink">What this solves</p>
+                <p className="mt-1">
+                  This tool decides whether a workload should run in its primary zone, route to a cleaner region, or pause for manager approval based on
+                  real-time grid carbon intensity.
+                </p>
+              </div>
+              <div>
+                <p className="font-semibold text-ink">How to run a decision</p>
+                <ol className="mt-1 list-decimal space-y-1 pl-5">
+                  <li>Set estimated job energy (kWh).</li>
+                  <li>Choose a carbon threshold (lower means stricter policy).</li>
+                  <li>Select the primary grid zone.</li>
+                  <li>Run Live, or use Demo scenarios for deterministic outcomes.</li>
+                </ol>
+              </div>
+              <div>
+                <p className="font-semibold text-ink">How approval works</p>
+                <p className="mt-1">
+                  When the primary zone exceeds policy limits, the workflow pauses and shows a Decision Briefing with local vs routed emissions before the
+                  approver selects Run Local, Route, or Postpone.
+                </p>
+              </div>
+              <div>
+                <p className="font-semibold text-ink">Understanding results</p>
+                <p className="mt-1">
+                  The dashboard explains the policy action, emissions estimates, routing savings, tradeoffs, and a timeline of every decision stage.
+                </p>
+              </div>
+              <div>
+                <p className="font-semibold text-ink">Data handling</p>
+                <p className="mt-1">
+                  Approver email and override reason are persisted in backend audit artifacts. Approver name and organization are client-side context only and
+                  never sent to backend APIs.
+                </p>
+              </div>
             </div>
             <div className="mt-6 flex justify-end gap-3">
               <button

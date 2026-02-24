@@ -15,10 +15,36 @@ from src.models import CandidateIntensity, ForecastPoint, ForecastResult, Sensor
 logger = logging.getLogger(__name__)
 
 _CACHE: dict[tuple[str, str, str, int], tuple[float, dict[str, Any]]] = {}
+_LAST_SENSOR_SUCCESS_AT: Optional[str] = None
 
 
 def clear_cache() -> None:
+    global _LAST_SENSOR_SUCCESS_AT
     _CACHE.clear()
+    _LAST_SENSOR_SUCCESS_AT = None
+
+
+def _mark_sensor_success(timestamp: Optional[str] = None) -> None:
+    global _LAST_SENSOR_SUCCESS_AT
+    if timestamp:
+        _LAST_SENSOR_SUCCESS_AT = timestamp
+        return
+    _LAST_SENSOR_SUCCESS_AT = datetime.now(timezone.utc).isoformat()
+
+
+def get_sensor_health_snapshot(stale_after_seconds: int = 900) -> dict[str, Any]:
+    if not _LAST_SENSOR_SUCCESS_AT:
+        return {"sensor_reachable": False, "last_sensor_success_at": None}
+
+    parsed = _parse_dt(_LAST_SENSOR_SUCCESS_AT)
+    if parsed is None:
+        return {"sensor_reachable": False, "last_sensor_success_at": _LAST_SENSOR_SUCCESS_AT}
+
+    age_seconds = (datetime.now(timezone.utc) - parsed).total_seconds()
+    return {
+        "sensor_reachable": age_seconds <= stale_after_seconds,
+        "last_sensor_success_at": _LAST_SENSOR_SUCCESS_AT,
+    }
 
 
 def _cache_get(key: tuple[str, str, str, int], ttl_seconds: int) -> Optional[dict[str, Any]]:
@@ -126,6 +152,7 @@ def get_carbon_intensity_latest(
     if error:
         return {"ok": False, "zone": zone, "intensity": None, "timestamp": None, "error": error}
 
+    _mark_sensor_success(payload.get("datetime") if isinstance(payload, dict) else None)
     intensity = payload.get("carbonIntensity")
     timestamp = payload.get("datetime")
     if intensity is None:
@@ -332,6 +359,10 @@ def get_carbon_intensity_forecast(
     if error:
         return {"ok": False, "zone": zone, "points": [], "best_point": None, "error": error}
 
+    if isinstance(payload, dict):
+        _mark_sensor_success(payload.get("datetime"))
+    else:
+        _mark_sensor_success()
     raw_points = _extract_forecast_points(payload)
     now_utc = datetime.now(timezone.utc)
     window_end = now_utc + timedelta(hours=hours)

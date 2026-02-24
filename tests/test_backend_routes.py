@@ -161,6 +161,8 @@ def test_health_endpoint_reports_sqlite_mode_with_path():
     assert payload["status"] == "ok"
     assert payload["storage_mode"] == "sqlite"
     assert payload["langgraph_db_path"] == "./langgraph_checkpoints.db"
+    assert "sensor_reachable" in payload
+    assert "last_sensor_success_at" in payload
 
 
 def test_health_endpoint_reports_postgres_mode_without_path():
@@ -174,3 +176,5 @@ def test_health_endpoint_reports_postgres_mode_without_path():
     assert payload["status"] == "ok"
     assert payload["storage_mode"] == "postgres"
     assert payload["langgraph_db_path"] is None
+    assert "sensor_reachable" in payload
+    assert "last_sensor_success_at" in payload
