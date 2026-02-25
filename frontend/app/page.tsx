@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useMemo, useRef, useState } from "react";
 import { signOut, useSession } from "next-auth/react";
 
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -259,6 +259,19 @@ function workflowStepIndex(decision: DecisionResponse, uiState: UIState): number
   return 0;
 }
 
+function elapsedSeconds(baseTs: string | null, ts: string): number | null {
+  if (!baseTs) return null;
+  const baseMs = Date.parse(baseTs);
+  const eventMs = Date.parse(ts);
+  if (!Number.isFinite(baseMs) || !Number.isFinite(eventMs)) return null;
+  return Math.max(0, Math.round((eventMs - baseMs) / 1000));
+}
+
+function formatElapsedLabel(seconds: number | null): string {
+  if (seconds === null) return "N/A";
+  return `+${seconds}s`;
+}
+
 export default function HomePage() {
   const { data: session, status: sessionStatus } = useSession();
   const [estimatedKwhStr, setEstimatedKwhStr] = useState<string>("500");
@@ -284,6 +297,7 @@ export default function HomePage() {
   const [selectedManagerAction, setSelectedManagerAction] = useState<ManagerOption | null>(null);
   const [armedManagerAction, setArmedManagerAction] = useState<ManagerOption | null>(null);
   const [lastStartPayload, setLastStartPayload] = useState<StartDecisionRequest | null>(null);
+  const [expandedTimelineDetails, setExpandedTimelineDetails] = useState<Record<string, boolean>>({});
   const approverEmail = session?.user?.email?.trim() ?? "";
 
   const startedAtRef = useRef<number | null>(null);
@@ -341,6 +355,10 @@ export default function HomePage() {
     }, MANAGER_CONFIRM_TIMEOUT_MS);
     return () => window.clearTimeout(id);
   }, [armedManagerAction]);
+
+  useEffect(() => {
+    setExpandedTimelineDetails({});
+  }, [decisionId]);
 
   useEffect(() => {
     if (!shouldPoll) return;
@@ -692,7 +710,84 @@ export default function HomePage() {
   const showErrorControls = uiState === "error";
   const showApprovalControls = uiState === "awaiting_approval";
   const auditParagraphs = splitAuditParagraphs(decision.audit_report);
+  const auditSourceLabel =
+    decision.audit_mode === "llm" ? "AI-generated" : decision.audit_mode === "template" ? "Template" : "Pending";
+  const isAuditAiGenerated = decision.audit_mode === "llm";
   const stepConnectorWidth = Math.max(0, Math.min(currentWorkflowStepIndex, WORKFLOW_STEPS.length - 1));
+  const showProgressSection = hasDecision && uiState !== "idle";
+  const showDecisionSummary = hasDecision && (uiState === "processing" || uiState === "awaiting_approval" || uiState === "final");
+  const showMetricsSection = hasDecision && (uiState === "awaiting_approval" || uiState === "final");
+  const showPolicyAuditSection = hasDecision && uiState === "final";
+  const showTradeoffSection = hasDecision && (uiState === "awaiting_approval" || uiState === "final");
+  const showCandidatesSection = hasDecision && uiState === "final";
+  const showTimelineSection = hasDecision && uiState === "final";
+  const showTechnicalMeta = hasDecision;
+
+  const completedSummary = useMemo(() => {
+    if (uiState !== "final") return null;
+
+    if (decision.execution_mode === "routed") {
+      return {
+        title: `Decision Complete - Routed to ${decision.selected_execution_zone ?? "cleaner zone"}`,
+        tone: "text-emerald-700 dark:text-emerald-300",
+        panel: "border-emerald-200/70 bg-emerald-50/75 dark:border-emerald-900/50 dark:bg-emerald-900/20",
+        detail: `Saved an estimated ${decision.estimated_kgco2_saved_by_routing ?? 0} kgCO2 by routing ${estimatedKwh} kWh from ${decision.primary_zone} (${decision.primary_intensity ?? "-"} gCO2eq/kWh) to ${decision.selected_execution_zone ?? "-"} (${decision.selected_execution_intensity ?? "-"} gCO2eq/kWh).`
+      };
+    }
+
+    if (decision.execution_mode === "local") {
+      return {
+        title: `Decision Complete - Executed locally in ${decision.selected_execution_zone ?? decision.primary_zone}`,
+        tone: "text-emerald-700 dark:text-emerald-300",
+        panel: "border-emerald-200/70 bg-emerald-50/75 dark:border-emerald-900/50 dark:bg-emerald-900/20",
+        detail: `Grid intensity (${decision.primary_intensity ?? "-"} gCO2eq/kWh) was within threshold (${threshold}). Estimated emissions: ${decision.estimated_kgco2_local ?? "-"} kgCO2.`
+      };
+    }
+
+    return {
+      title: "Decision Complete - Execution postponed",
+      tone: "text-amber-700 dark:text-amber-300",
+      panel: "border-amber-200/70 bg-amber-50/75 dark:border-amber-900/50 dark:bg-amber-900/20",
+      detail: "Manager deferred execution. No emissions incurred yet; re-evaluate when grid conditions improve."
+    };
+  }, [
+    decision.estimated_kgco2_local,
+    decision.estimated_kgco2_saved_by_routing,
+    decision.execution_mode,
+    decision.primary_intensity,
+    decision.primary_zone,
+    decision.selected_execution_intensity,
+    decision.selected_execution_zone,
+    estimatedKwh,
+    threshold,
+    uiState
+  ]);
+
+  const lastIntensityUpdatedAt = useMemo(() => {
+    const allTimestamps = decision.routing_top3
+      .map((candidate) => candidate.datetime)
+      .filter((value): value is string => Boolean(value));
+    if (allTimestamps.length === 0) return null;
+    const latest = allTimestamps.reduce((currentMax, value) => {
+      if (!currentMax) return value;
+      return Date.parse(value) > Date.parse(currentMax) ? value : currentMax;
+    }, allTimestamps[0] ?? null);
+    return latest ? formatTimestamp(latest) : null;
+  }, [decision.routing_top3]);
+
+  const timelineRows = useMemo(() => {
+    const baseTs = decision.timeline[0]?.ts ?? null;
+    return decision.timeline.map((event, index) => {
+      const id = `${event.ts}-${event.stage}-${index}`;
+      const seconds = elapsedSeconds(baseTs, event.ts);
+      return {
+        id,
+        event,
+        elapsedLabel: formatElapsedLabel(seconds),
+        hasData: Boolean(event.data && Object.keys(event.data).length > 0)
+      };
+    });
+  }, [decision.timeline]);
 
   if (sessionStatus === "loading") {
     return (
@@ -945,7 +1040,9 @@ export default function HomePage() {
             {(uiState === "idle" || uiState === "submitting") && showDemoScenarios && (
               <div className="rounded-2xl border border-dashed border-fern/35 bg-zinc-100/80 p-4 dark:bg-zinc-900/70">
                 <p className="text-xs font-semibold uppercase tracking-wide text-fern">Demo Scenarios</p>
-                <p className="mt-1 text-xs text-fern">Deterministic scenarios for interview-ready outcomes.</p>
+                <p className="mt-1 text-xs text-fern">
+                  Deterministic scenarios for predictable policy paths when live conditions do not trigger every branch.
+                </p>
                 <div className="mt-3 flex flex-wrap gap-3">
                   <button
                     className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
@@ -1083,127 +1180,111 @@ export default function HomePage() {
             )}
           </div>
 
-          {hasDecision ? (
-            <>
-              <p className="mt-3 text-xs text-fern">Demo scenarios use deterministic synthetic intensities to guarantee interview-ready outcomes.</p>
-              <p className="mt-4 text-xs text-fern">
-                Decision ID: <span className="font-mono">{decisionId}</span>
-              </p>
-              <p className="mt-2 text-xs uppercase tracking-wide text-fern">
-                Run mode: {activeDemoScenario ? DEMO_SCENARIO_LABELS[activeDemoScenario] : "Live API"}
-              </p>
-
-              <div className="mt-4 rounded-xl border border-moss/25 bg-zinc-100/80 p-4 dark:bg-zinc-900/70">
-                <div className="relative">
-                  <div className="pointer-events-none absolute left-3 right-3 top-3 hidden h-[2px] rounded-full bg-zinc-300 dark:bg-zinc-700 md:block">
-                    <span
-                      className="block h-full rounded-full bg-emerald-500/60 transition-all"
-                      style={{ width: `${(stepConnectorWidth / (WORKFLOW_STEPS.length - 1)) * 100}%` }}
-                    />
-                  </div>
+          {showProgressSection ? (
+            <div className="section-reveal mt-4 rounded-xl border border-moss/25 bg-zinc-100/80 p-4 dark:bg-zinc-900/70">
+              <div className="relative">
+                <div className="pointer-events-none absolute left-3 right-3 top-3 hidden h-[2px] rounded-full bg-zinc-300 dark:bg-zinc-700 md:block">
+                  <span
+                    className="block h-full rounded-full bg-emerald-500/60 transition-all"
+                    style={{ width: `${(stepConnectorWidth / (WORKFLOW_STEPS.length - 1)) * 100}%` }}
+                  />
                 </div>
-                <ol className="grid gap-4 md:grid-cols-5 md:gap-8">
-                  {WORKFLOW_STEPS.map((step, index) => {
-                    const isComplete = currentWorkflowStepIndex > index;
-                    const isActive = currentWorkflowStepIndex === index;
-                    return (
-                      <li key={step} className="relative flex items-center gap-2">
-                        <span
-                          className={`inline-flex h-6 w-6 items-center justify-center rounded-full border text-xs font-bold ${
-                            isComplete
-                              ? "border-emerald-500 bg-emerald-500 text-white"
-                              : isActive
-                                ? "border-amber-500 bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
-                                : "border-moss/40 bg-white/70 text-fern dark:bg-zinc-800/70"
-                          }`}
-                        >
-                          {index + 1}
-                        </span>
-                        <span className={`text-sm font-semibold ${isActive ? "text-ink" : "text-fern"}`}>{step}</span>
-                      </li>
-                    );
-                  })}
-                </ol>
-                {activeProcessingStep && (
-                  <p className="mt-3 text-sm text-fern">Current stage: {activeProcessingStep}</p>
-                )}
-                {showProcessingBar && (
-                  <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-moss/20 dark:bg-moss/35">
-                    <span className="block h-full w-1/3 rounded-full bg-emerald-500 motion-safe:animate-[indeterminate_1.35s_ease-in-out_infinite] dark:bg-emerald-400" />
-                  </div>
-                )}
               </div>
-
-              <p className="mt-3 rounded-lg border border-moss/30 bg-moss/5 px-3 py-2 text-sm text-ink">{decisionExplanation}</p>
-              {decision.manager_prompt && uiState === "awaiting_approval" && (
-                <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-900/20 dark:text-amber-300">
-                  {cleanManagerPrompt(decision.manager_prompt)}
-                </p>
+              <ol className="grid gap-4 md:grid-cols-5 md:gap-8">
+                {WORKFLOW_STEPS.map((step, index) => {
+                  const isComplete = currentWorkflowStepIndex > index;
+                  const isActive = currentWorkflowStepIndex === index;
+                  return (
+                    <li key={step} className="relative flex items-center gap-2">
+                      <span
+                        className={`inline-flex h-6 w-6 items-center justify-center rounded-full border text-xs font-bold ${
+                          isComplete
+                            ? "border-emerald-500 bg-emerald-500 text-white"
+                            : isActive
+                              ? "border-amber-500 bg-amber-100 text-amber-900 dark:bg-amber-900/40 dark:text-amber-200"
+                              : "border-moss/40 bg-white/70 text-fern dark:bg-zinc-800/70"
+                        }`}
+                      >
+                        {index + 1}
+                      </span>
+                      <span className={`text-sm font-semibold ${isActive ? "text-ink" : "text-fern"}`}>{step}</span>
+                    </li>
+                  );
+                })}
+              </ol>
+              {activeProcessingStep && <p className="mt-3 text-sm text-fern">Current stage: {activeProcessingStep}</p>}
+              {showProcessingBar && (
+                <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-moss/20 dark:bg-moss/35">
+                  <span className="block h-full w-1/3 rounded-full bg-emerald-500 motion-safe:animate-[indeterminate_1.35s_ease-in-out_infinite] dark:bg-emerald-400" />
+                </div>
               )}
-            </>
+            </div>
           ) : (
             <p className="mt-4 text-sm text-fern">Start a live or demo decision to populate metrics, policy output, tradeoffs, and timeline.</p>
+          )}
+
+          {showDecisionSummary && <p className="mt-3 rounded-lg border border-moss/30 bg-moss/5 px-3 py-2 text-sm text-ink">{decisionExplanation}</p>}
+          {decision.manager_prompt && uiState === "awaiting_approval" && (
+            <p className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:border-amber-900 dark:bg-amber-900/20 dark:text-amber-300">
+              {cleanManagerPrompt(decision.manager_prompt)}
+            </p>
           )}
 
           {error && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-300">{error}</p>}
         </section>
 
         {hasDecision && (
-          <>
-            <section className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
-              <article className="panel-strong rounded-2xl px-6 py-5">
-                <p className="text-xs uppercase tracking-[0.16em] text-fern">Primary Zone Intensity</p>
-                <div className="mt-2 min-h-9">
-                  {uiState === "processing" && decision.primary_intensity === null ? (
-                    <span className="inline-block h-8 w-20 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
-                  ) : (
+          <div className="space-y-8">
+            {showFinalControls && completedSummary && (
+              <section className={`section-reveal rounded-2xl border px-6 py-5 ${completedSummary.panel}`}>
+                <p className={`text-lg font-semibold ${completedSummary.tone}`}>{completedSummary.title}</p>
+                <p className="mt-2 text-sm text-fern">{completedSummary.detail}</p>
+                <p className="mt-2 text-xs text-fern">
+                  Approved by {decision.manager_id ?? "N/A"} · {decision.accounting_method} accounting
+                </p>
+              </section>
+            )}
+
+            {showMetricsSection && (
+              <section className="section-reveal grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+                <article className="panel-strong rounded-2xl px-6 py-5">
+                  <p className="text-xs uppercase tracking-[0.16em] text-fern">Primary Zone Intensity</p>
+                  <div className="mt-2 min-h-9">
                     <p className={`text-3xl font-semibold ${intensityClassName(primaryIntensitySeverity)}`}>{decision.primary_intensity ?? "-"}</p>
-                  )}
-                </div>
-                <p className="text-sm text-fern">gCO2eq/kWh</p>
-              </article>
-              <article className="panel-strong rounded-2xl px-6 py-5">
-                <p className="text-xs uppercase tracking-[0.16em] text-fern">Selected Execution Zone</p>
-                <div className="mt-2 min-h-9">
-                  {uiState === "processing" && decision.selected_execution_zone === null ? (
-                    <span className="inline-block h-8 w-24 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
-                  ) : (
+                  </div>
+                  <p className="text-sm text-fern">gCO2eq/kWh</p>
+                </article>
+                <article className="panel-strong rounded-2xl px-6 py-5">
+                  <p className="text-xs uppercase tracking-[0.16em] text-fern">Selected Execution Zone</p>
+                  <div className="mt-2 min-h-9">
                     <p className="text-3xl font-semibold text-ink">{decision.selected_execution_zone ?? "-"}</p>
-                  )}
-                </div>
-                <p className={`text-sm ${intensityClassName(selectedIntensitySeverity)}`}>{decision.selected_execution_intensity ?? "-"} gCO2eq/kWh</p>
-              </article>
-              <article className="panel-strong rounded-2xl px-6 py-5">
-                <p className="text-xs uppercase tracking-[0.16em] text-fern">Execution Mode</p>
-                <div className="mt-2 min-h-9">
-                  {uiState === "processing" && decision.execution_mode === null ? (
-                    <span className="inline-block h-8 w-16 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
-                  ) : (
+                  </div>
+                  <p className={`text-sm ${intensityClassName(selectedIntensitySeverity)}`}>{decision.selected_execution_intensity ?? "-"} gCO2eq/kWh</p>
+                </article>
+                <article className="panel-strong rounded-2xl px-6 py-5">
+                  <p className="text-xs uppercase tracking-[0.16em] text-fern">Execution Mode</p>
+                  <div className="mt-2 min-h-9">
                     <p className="text-3xl font-semibold text-ink">{decision.execution_mode ?? "-"}</p>
-                  )}
-                </div>
-                <p className="text-sm text-fern">local / routed / postponed</p>
-              </article>
-              <article
-                className={`rounded-2xl px-6 py-5 ${
-                  isRealized
-                    ? "border border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-900/20"
-                    : isForegone
-                      ? "border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-900/20"
-                      : "panel-strong"
-                }`}
-              >
-                <p
-                  className={`text-xs uppercase tracking-[0.16em] ${
-                    isRealized ? "text-emerald-700 dark:text-emerald-300" : isForegone ? "text-amber-700 dark:text-amber-300" : "text-fern"
+                  </div>
+                  <p className="text-sm text-fern">local / routed / postponed</p>
+                </article>
+                <article
+                  className={`rounded-2xl px-6 py-5 ${
+                    isRealized
+                      ? "border border-emerald-200 bg-emerald-50 dark:border-emerald-900 dark:bg-emerald-900/20"
+                      : isForegone
+                        ? "border border-amber-200 bg-amber-50 dark:border-amber-900 dark:bg-amber-900/20"
+                        : "panel-strong"
                   }`}
                 >
-                  {isForegone ? "Foregone Savings" : "Routing Savings"}
-                </p>
-                <div className="mt-2 min-h-9">
-                  {uiState === "processing" && decision.estimated_kgco2_saved_by_routing === null ? (
-                    <span className="inline-block h-8 w-20 animate-pulse rounded bg-moss/30 dark:bg-moss/40" />
-                  ) : (
+                  <p
+                    className={`text-xs uppercase tracking-[0.16em] ${
+                      isRealized ? "text-emerald-700 dark:text-emerald-300" : isForegone ? "text-amber-700 dark:text-amber-300" : "text-fern"
+                    }`}
+                  >
+                    {isForegone ? "Foregone Savings" : "Routing Savings"}
+                  </p>
+                  <div className="mt-2 min-h-9">
                     <p
                       className={`text-3xl font-semibold ${
                         isRealized ? "text-emerald-800 dark:text-emerald-300" : isForegone ? "text-amber-800 dark:text-amber-300" : "text-ink"
@@ -1211,186 +1292,264 @@ export default function HomePage() {
                     >
                       {decision.estimated_kgco2_saved_by_routing ?? "-"}
                     </p>
-                  )}
-                </div>
-                <p className={`text-sm ${isRealized ? "text-emerald-600 dark:text-emerald-300" : isForegone ? "text-amber-600 dark:text-amber-300" : "text-fern"}`}>
-                  kgCO2
-                </p>
-              </article>
-            </section>
-
-            <section className="grid gap-4 lg:grid-cols-2">
-              <article className="panel-strong rounded-2xl p-5">
-                <h2 className="text-lg font-bold text-ink">Policy Decision</h2>
-                <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-fern">
-                  <span className="font-semibold text-ink">Action:</span>
-                  <PolicyActionBadge action={decision.policy_action} />
-                </div>
-                <p className="mt-2 text-sm text-fern">
-                  <span className="font-semibold text-ink">Reason:</span> {decision.policy_reason ?? "Waiting for evaluation..."}
-                </p>
-                <p className="mt-2 text-sm text-fern">
-                  <span className="font-semibold text-ink">Estimated Local:</span> {decision.estimated_kgco2_local ?? "-"} kgCO2
-                </p>
-                <p className="mt-2 text-sm text-fern">
-                  <span className="font-semibold text-ink">Estimated Routed:</span> {decision.estimated_kgco2_routed ?? "-"} kgCO2
-                </p>
-                <p className="mt-2 text-sm text-fern">
-                  <span className="font-semibold text-ink">Accounting Method:</span> {decision.accounting_method}
-                </p>
-                <p className="mt-2 text-sm text-fern">
-                  <span className="font-semibold text-ink">Approver Email:</span> {decision.manager_id ?? "N/A"}
-                </p>
-                <p className="mt-2 text-sm text-fern">
-                  <span className="font-semibold text-ink">Override Reason:</span> {decision.override_reason ?? "N/A"}
-                </p>
-                <p className="mt-3 rounded-md border border-moss/30 bg-moss/10 px-2 py-1 text-xs text-fern dark:bg-moss/20">
-                  Estimates use point-in-time intensity; actual emissions depend on job duration.
-                </p>
-              </article>
-
-              <article className="panel-strong rounded-2xl p-5">
-                <h2 className="text-lg font-bold text-ink">Audit Report</h2>
-                <p className="mt-2 text-xs uppercase tracking-wide text-fern">Mode: {decision.audit_mode ?? "pending"}</p>
-                {auditParagraphs.length > 0 ? (
-                  <div className="mt-3 space-y-3 text-sm text-ink">
-                    {auditParagraphs.map((paragraph, idx) => (
-                      <p key={`${idx}-${paragraph.slice(0, 20)}`}>{paragraph}</p>
-                    ))}
                   </div>
-                ) : (
-                  <p className="mt-3 whitespace-pre-wrap text-sm text-ink">Audit report appears when workflow reaches completion.</p>
-                )}
-              </article>
-            </section>
+                  <p className={`text-sm ${isRealized ? "text-emerald-600 dark:text-emerald-300" : isForegone ? "text-amber-600 dark:text-amber-300" : "text-fern"}`}>
+                    kgCO2
+                  </p>
+                </article>
+              </section>
+            )}
 
-            <section className="panel-strong rounded-2xl p-5">
-              <h2 className="text-lg font-bold text-ink">Execution Tradeoff Comparison</h2>
-              <p className="mt-2 text-xs text-fern">
-                Compares operational options on emissions, latency, residency, and estimated cost impact.
-              </p>
-              <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
-                <table className="min-w-full divide-y divide-moss/20 text-sm">
-                  <thead className="bg-moss/10 text-left">
-                    <tr>
-                      <th className="px-4 py-3 font-semibold text-ink">Option</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Zone</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Carbon (kgCO2)</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Est. Latency</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Data Residency</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Cost Impact</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
-                    {tradeoffRows.map((row, index) => {
-                      const selected = chosenTradeoffOption === row.option;
-                      return (
-                        <tr
-                          key={row.option}
-                          className={`${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} ${
-                            selected ? "ring-1 ring-inset ring-emerald-300/50 dark:ring-emerald-700/40" : ""
-                          }`}
-                        >
-                          <td className={`px-4 py-3 text-ink ${selected ? "border-l-2 border-emerald-500 font-bold" : "font-semibold"}`}>{row.option}</td>
-                          <td className="px-4 py-3 text-ink">{row.zone}</td>
-                          <td className="px-4 py-3 text-ink">{row.carbon}</td>
-                          <td className="px-4 py-3 text-ink">{row.latency}</td>
-                          <td className="px-4 py-3 text-ink">{row.dataResidency}</td>
-                          <td className="px-4 py-3 text-ink">{row.costImpact}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              {decision.execution_mode === "postponed" && (
-                <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-900/20 dark:text-sky-200">
-                  {decision.forecast_available && decision.forecast_recommendation ? (
-                    <>
-                      <span className="font-semibold">Forecast guidance:</span> {decision.forecast_recommendation}
-                    </>
-                  ) : (
-                    "No forecast guidance available — check back manually."
-                  )}
-                </div>
-              )}
-            </section>
+            {showPolicyAuditSection && (
+              <>
+                <div className="border-t border-zinc-300/60 dark:border-zinc-800/70" />
+                <section className="section-reveal grid gap-4 lg:grid-cols-2">
+                  <article className="panel-strong rounded-2xl p-5">
+                    <h2 className="text-lg font-bold text-ink">Policy Decision</h2>
+                    <div className="mt-3 flex flex-wrap items-center gap-2 text-sm text-fern">
+                      <span className="font-semibold text-ink">Action:</span>
+                      <PolicyActionBadge action={decision.policy_action} />
+                    </div>
+                    <p className="mt-2 text-sm text-fern">
+                      <span className="font-semibold text-ink">Reason:</span> {decision.policy_reason ?? "Waiting for evaluation..."}
+                    </p>
+                    <p className="mt-2 text-sm text-fern">
+                      <span className="font-semibold text-ink">Estimated Local:</span> {decision.estimated_kgco2_local ?? "-"} kgCO2
+                    </p>
+                    <p className="mt-2 text-sm text-fern">
+                      <span className="font-semibold text-ink">Estimated Routed:</span> {decision.estimated_kgco2_routed ?? "-"} kgCO2
+                    </p>
+                    <p className="mt-2 text-sm text-fern">
+                      <span className="font-semibold text-ink">Accounting Method:</span> {decision.accounting_method}
+                    </p>
+                    <p className="mt-2 text-sm text-fern">
+                      <span className="font-semibold text-ink">Approver Email:</span> {decision.manager_id ?? "N/A"}
+                    </p>
+                    <p className="mt-2 text-sm text-fern">
+                      <span className="font-semibold text-ink">Override Reason:</span> {decision.override_reason ?? "N/A"}
+                    </p>
+                    <p className="mt-3 rounded-md border border-moss/30 bg-moss/10 px-2 py-1 text-xs text-fern dark:bg-moss/20">
+                      Estimates use point-in-time intensity; actual emissions depend on job duration.
+                    </p>
+                  </article>
 
-            <section className="panel-strong rounded-2xl p-5">
-              <h2 className="text-lg font-bold text-ink">Top 3 Cleanest Candidate Zones</h2>
-              <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
-                <table className="min-w-full divide-y divide-moss/20 text-sm">
-                  <thead className="bg-moss/10 text-left">
-                    <tr>
-                      <th className="px-4 py-3 font-semibold text-ink">Zone</th>
-                      <th className="px-4 py-3 text-right font-semibold text-ink">Intensity (gCO2eq/kWh)</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Updated</th>
-                      <th className="px-4 py-3 font-semibold text-ink">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
-                    {decision.routing_top3.length > 0 ? (
-                      decision.routing_top3.map((candidate, index) => (
-                        <tr
-                          key={`${candidate.zone}-${candidate.datetime ?? "none"}`}
-                          className={index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"}
-                        >
-                          <td className="px-4 py-3 text-ink">{candidate.zone}</td>
-                          <td className="px-4 py-3 text-right font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
-                          <td className="px-4 py-3 text-ink">{formatTimestamp(candidate.datetime)}</td>
-                          <td className="px-4 py-3 text-ink">{candidate.ok ? "OK" : `Error: ${candidate.error ?? "unknown"}`}</td>
-                        </tr>
-                      ))
-                    ) : (
-                      <tr>
-                        <td className="px-4 py-6 text-fern" colSpan={4}>
-                          No routing candidates available yet.
-                        </td>
-                      </tr>
+                  <article className="panel-strong rounded-2xl p-5">
+                    <h2 className="text-lg font-bold text-ink">Audit Report</h2>
+                    <p className="mt-2 text-xs uppercase tracking-wide text-fern">Summary Source: {auditSourceLabel}</p>
+                    {isAuditAiGenerated && (
+                      <p className="mt-1 text-xs text-fern">
+                        AI-generated summary; verify operational decisions against policy output and timeline.
+                      </p>
                     )}
-                  </tbody>
-                </table>
-              </div>
-            </section>
+                    {auditParagraphs.length > 0 ? (
+                      <div className="mt-3 space-y-3 text-sm text-ink">
+                        {auditParagraphs.map((paragraph, idx) => (
+                          <p key={`${idx}-${paragraph.slice(0, 20)}`}>{paragraph}</p>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="mt-3 whitespace-pre-wrap text-sm text-ink">Audit report appears when workflow reaches completion.</p>
+                    )}
+                  </article>
+                </section>
+              </>
+            )}
 
-            <section className="panel-strong rounded-2xl p-5">
-              <h2 className="text-lg font-bold text-ink">Decision Replay Timeline</h2>
-              {decision.timeline.length === 0 ? (
-                <p className="mt-3 text-sm text-fern">Timeline appears as the workflow executes.</p>
-              ) : (
-                <div className="mt-4 space-y-3 border-l-2 border-zinc-300/80 pl-4 dark:border-zinc-700">
-                  {decision.timeline.map((event, index) => (
-                    <details
-                      key={`${event.ts}-${event.stage}-${index}`}
-                      open={index === decision.timeline.length - 1}
-                      className="relative rounded-xl border border-moss/20 bg-zinc-50/80 px-4 py-3 dark:bg-zinc-900/60"
-                    >
-                      <span
-                        className={`pointer-events-none absolute -left-[1.2rem] top-4 h-2.5 w-2.5 rounded-full border ${
-                          index === decision.timeline.length - 1
-                            ? "border-emerald-400 bg-emerald-400/80"
-                            : "border-zinc-400 bg-zinc-300 dark:border-zinc-600 dark:bg-zinc-700"
-                        }`}
-                      />
-                      <summary className="cursor-pointer text-sm font-semibold text-ink">
-                        {formatTimestamp(event.ts)} | {event.stage} | {event.message}
-                      </summary>
-                      {event.data && Object.keys(event.data).length > 0 && (
-                        <details className="mt-3 rounded border border-moss/20 bg-slate-50 dark:bg-zinc-900/80">
-                          <summary className="cursor-pointer px-3 py-2 text-sm font-medium text-fern">
-                            Show technical details
-                          </summary>
-                          <pre className="overflow-x-auto border-t border-moss/20 px-3 py-3 text-xs text-slate-700 dark:text-slate-200">
-                            {JSON.stringify(event.data, null, 2)}
-                          </pre>
-                        </details>
+            {showTradeoffSection && (
+              <>
+                <div className="border-t border-zinc-300/60 dark:border-zinc-800/70" />
+                <section className="section-reveal panel-strong rounded-2xl p-5">
+                  <h2 className="text-lg font-bold text-ink">Execution Tradeoff Comparison</h2>
+                  <p className="mt-2 text-xs text-fern">
+                    Compares operational options on emissions, latency, residency, and estimated cost impact.
+                  </p>
+                  <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
+                    <table className="min-w-full divide-y divide-moss/20 text-sm">
+                      <thead className="bg-moss/10 text-left">
+                        <tr>
+                          <th className="px-4 py-3 font-semibold text-ink">Option</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Zone</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Carbon (kgCO2)</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Est. Latency</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Data Residency</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Cost Impact</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
+                        {tradeoffRows.map((row, index) => {
+                          const selected = chosenTradeoffOption === row.option;
+                          return (
+                            <tr
+                              key={row.option}
+                              className={`${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} ${
+                                selected ? "ring-1 ring-inset ring-emerald-300/50 dark:ring-emerald-700/40" : ""
+                              }`}
+                            >
+                              <td className={`px-4 py-3 text-ink ${selected ? "border-l-2 border-emerald-500 font-bold" : "font-semibold"}`}>{row.option}</td>
+                              <td className="px-4 py-3 text-ink">{row.zone}</td>
+                              <td className="px-4 py-3 text-ink">{row.carbon}</td>
+                              <td className="px-4 py-3 text-ink">{row.latency}</td>
+                              <td className="px-4 py-3 text-ink">{row.dataResidency}</td>
+                              <td className="px-4 py-3 text-ink">{row.costImpact}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                  {decision.execution_mode === "postponed" && (
+                    <div className="mt-4 rounded-lg border border-sky-200 bg-sky-50 px-4 py-3 text-sm text-sky-900 dark:border-sky-900 dark:bg-sky-900/20 dark:text-sky-200">
+                      {decision.forecast_available && decision.forecast_recommendation ? (
+                        <>
+                          <span className="font-semibold">Forecast guidance:</span> {decision.forecast_recommendation}
+                        </>
+                      ) : (
+                        "No forecast guidance available - check back manually."
                       )}
-                    </details>
-                  ))}
+                    </div>
+                  )}
+                </section>
+              </>
+            )}
+
+            {showCandidatesSection && (
+              <section className="section-reveal panel-strong rounded-2xl p-5">
+                <h2 className="text-lg font-bold text-ink">Top 3 Cleanest Candidate Zones</h2>
+                <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
+                  <table className="min-w-full divide-y divide-moss/20 text-sm">
+                    <thead className="bg-moss/10 text-left">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold text-ink">Zone</th>
+                        <th className="px-4 py-3 text-right font-semibold text-ink">Intensity (gCO2eq/kWh)</th>
+                        <th className="px-4 py-3 font-semibold text-ink">Updated</th>
+                        <th className="px-4 py-3 font-semibold text-ink">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
+                      {decision.routing_top3.length > 0 ? (
+                        decision.routing_top3.map((candidate, index) => (
+                          <tr
+                            key={`${candidate.zone}-${candidate.datetime ?? "none"}`}
+                            className={index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"}
+                          >
+                            <td className="px-4 py-3 text-ink">{candidate.zone}</td>
+                            <td className="px-4 py-3 text-right font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
+                            <td className="px-4 py-3 text-ink">{formatTimestamp(candidate.datetime)}</td>
+                            <td className="px-4 py-3 text-ink">{candidate.ok ? "OK" : `Error: ${candidate.error ?? "unknown"}`}</td>
+                          </tr>
+                        ))
+                      ) : (
+                        <tr>
+                          <td className="px-4 py-6 text-fern" colSpan={4}>
+                            No routing candidates available yet.
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                  </table>
                 </div>
-              )}
-            </section>
-          </>
+                <p className="mt-3 text-xs text-fern">
+                  Carbon intensity via{" "}
+                  <a
+                    href="https://www.electricitymaps.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline-offset-2 transition hover:text-ink hover:underline"
+                  >
+                    Electricity Maps API
+                  </a>{" "}
+                  {lastIntensityUpdatedAt ? `· Last updated ${lastIntensityUpdatedAt}` : ""}
+                </p>
+              </section>
+            )}
+
+            {showTimelineSection && (
+              <section className="section-reveal panel-strong rounded-2xl p-5">
+                <h2 className="text-lg font-bold text-ink">Decision Replay Timeline</h2>
+                <p className="mt-2 text-xs text-fern">Elapsed times show workflow pacing, including human-in-the-loop approval delay.</p>
+                {timelineRows.length === 0 ? (
+                  <p className="mt-3 text-sm text-fern">Timeline appears as the workflow executes.</p>
+                ) : (
+                  <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
+                    <table className="min-w-full divide-y divide-moss/20 text-sm">
+                      <thead className="bg-moss/10 text-left">
+                        <tr>
+                          <th className="px-4 py-3 font-semibold text-ink">Elapsed</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Stage</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Description</th>
+                          <th className="px-4 py-3 font-semibold text-ink">Details</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
+                        {timelineRows.map((row, index) => {
+                          const highlighted = row.event.stage === "manager.decision" || row.event.stage === "execution.final";
+                          const expanded = expandedTimelineDetails[row.id] ?? false;
+                          return (
+                            <Fragment key={row.id}>
+                              <tr className={`${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} ${highlighted ? "border-l-2 border-emerald-500" : ""}`}>
+                                <td className="px-4 py-3 font-mono text-xs text-fern">{row.elapsedLabel}</td>
+                                <td className="px-4 py-3">
+                                  <span className="inline-flex rounded-full border border-moss/30 px-2 py-1 text-xs font-semibold text-fern">
+                                    {row.event.stage}
+                                  </span>
+                                </td>
+                                <td className="px-4 py-3 text-ink">
+                                  {row.event.message}
+                                  <p className="mt-1 text-xs text-fern">{formatTimestamp(row.event.ts)}</p>
+                                </td>
+                                <td className="px-4 py-3">
+                                  {row.hasData ? (
+                                    <button
+                                      type="button"
+                                      className="text-sm text-fern underline-offset-2 transition hover:text-ink hover:underline"
+                                      onClick={() =>
+                                        setExpandedTimelineDetails((current) => ({
+                                          ...current,
+                                          [row.id]: !expanded
+                                        }))
+                                      }
+                                    >
+                                      {expanded ? "Hide technical details" : "Show technical details"}
+                                    </button>
+                                  ) : (
+                                    <span className="text-xs text-fern">-</span>
+                                  )}
+                                </td>
+                              </tr>
+                              {row.hasData && expanded && (
+                                <tr className="bg-zinc-100/80 dark:bg-zinc-950/70">
+                                  <td className="px-4 py-3" colSpan={4}>
+                                    <pre className="overflow-x-auto rounded-md border border-moss/20 bg-zinc-50 px-3 py-3 text-xs text-slate-700 dark:bg-zinc-900 dark:text-slate-200">
+                                      {JSON.stringify(row.event.data, null, 2)}
+                                    </pre>
+                                  </td>
+                                </tr>
+                              )}
+                            </Fragment>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+            )}
+
+            {showTechnicalMeta && (
+              <details className="rounded-xl border border-moss/20 bg-zinc-100/70 px-4 py-3 text-sm text-fern dark:bg-zinc-900/65">
+                <summary className="cursor-pointer text-xs font-semibold uppercase tracking-wide text-fern">Technical details</summary>
+                <div className="mt-3 space-y-2 text-xs">
+                  <p>
+                    Decision ID: <span className="font-mono text-ink">{decisionId}</span>
+                  </p>
+                  <p>Run mode: {activeDemoScenario ? DEMO_SCENARIO_LABELS[activeDemoScenario] : "Live API"}</p>
+                  <p>
+                    Demo scenarios use synthetic intensity profiles to provide predictable policy paths when live conditions do not trigger every branch.
+                  </p>
+                </div>
+              </details>
+            )}
+          </div>
         )}
       </div>
 

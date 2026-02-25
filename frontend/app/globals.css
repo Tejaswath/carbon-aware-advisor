@@ -82,6 +82,10 @@ main {
   border-color: var(--border-strong);
 }
 
+.section-reveal {
+  animation: section-fade-in 220ms ease-out;
+}
+
 @keyframes indeterminate {
   0% {
     transform: translateX(-120%);
@@ -91,5 +95,16 @@ main {
   }
   100% {
     transform: translateX(220%);
+  }
+}
+
+@keyframes section-fade-in {
+  0% {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0);
   }
 }

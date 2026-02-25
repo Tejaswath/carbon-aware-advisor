@@ -149,7 +149,21 @@ export default function LoginPage() {
               </div>
             </div>
 
-            <p className="text-center text-sm text-zinc-500">Sense grid -&gt; Apply policy -&gt; Route or escalate -&gt; Audit trail</p>
+            <div className="space-y-2 text-center">
+              <p className="text-sm text-zinc-500">Sense grid → Apply policy → Route or escalate → Audit trail</p>
+              <p className="text-xs text-zinc-600">
+                Powered by live carbon-intensity data from{" "}
+                <a
+                  href="https://www.electricitymaps.com/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline-offset-2 transition hover:text-zinc-400 hover:underline"
+                >
+                  Electricity Maps
+                </a>{" "}
+                · LangGraph · Next.js
+              </p>
+            </div>
           </section>
         </div>
       </div>
