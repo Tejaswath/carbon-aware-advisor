@@ -111,7 +111,7 @@ export default function LoginPage() {
             <div className="space-y-4">
               <button
                 type="button"
-                className="w-full rounded-xl border border-transparent bg-emerald-500 px-6 py-3 text-lg font-semibold text-white transition hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-65"
+                className="interactive-base focus-ring w-full rounded-xl border border-transparent bg-emerald-500 px-6 py-3 text-lg font-semibold text-white hover:bg-emerald-600 disabled:cursor-not-allowed disabled:opacity-65"
                 onClick={() => void signIn("google", { callbackUrl: "/" })}
                 disabled={disableGoogle}
               >
@@ -120,7 +120,7 @@ export default function LoginPage() {
 
               <button
                 type="button"
-                className="w-full rounded-xl border border-zinc-700 bg-transparent px-6 py-3 text-lg font-semibold text-white transition hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
+                className="interactive-base focus-ring w-full rounded-xl border border-zinc-700 bg-transparent px-6 py-3 text-lg font-semibold text-white hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-60"
                 onClick={() => void signIn("github", { callbackUrl: "/" })}
                 disabled={disableGitHub}
               >

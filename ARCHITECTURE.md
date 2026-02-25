@@ -38,8 +38,12 @@ Rationale:
    - GitHub (optional, enabled only when provider env vars are present).
 3. Middleware protects dashboard routes and redirects unauthenticated users to `/login`.
 4. Governance identity binding:
+   - primary zone is the initial execution context; policy can route execution to a cleaner zone using live signal + threshold evaluation.
    - manager actions submit authenticated session email as `manager_id`.
    - approver name/organization fields remain client-local context only.
+5. Manager action UX guardrail:
+   - frontend requires single-click + confirmation modal before submitting manager actions.
+   - this confirmation is a UI safety control, not a backend/LangGraph workflow requirement.
 
 ## 2) Known Limits in Current Design
 

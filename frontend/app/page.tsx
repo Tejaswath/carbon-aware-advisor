@@ -7,13 +7,12 @@ import { ThemeToggle } from "@/components/theme-toggle";
 import { PolicyActionBadge, StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
 import { useThemePreference } from "@/lib/use-theme-preference";
-import { DecisionResponse, DemoScenario, ManagerOption, StartDecisionRequest } from "@/lib/types";
+import { DecisionResponse, DecisionStatus, DemoScenario, ManagerOption, StartDecisionRequest } from "@/lib/types";
 
 const POLL_MS = 2000;
 const TIMEOUT_MS = 90000;
 const GEOLOCATION_TIMEOUT_MS = 15000;
 const MARGINAL_OVER_THRESHOLD_FACTOR = 1.3;
-const MANAGER_CONFIRM_TIMEOUT_MS = 3000;
 const DEFAULT_PRIMARY_ZONES = ["SE-SE1", "SE-SE2", "SE-SE3", "SE-SE4"];
 const CONFIGURED_PRIMARY_ZONES = (
   process.env.NEXT_PUBLIC_PRIMARY_ZONES ?? DEFAULT_PRIMARY_ZONES.join(",")
@@ -109,6 +108,31 @@ function formatTimestamp(value: string | null): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) return value;
   return date.toLocaleString();
+}
+
+function formatRelativeTime(value: string | null): string | null {
+  if (!value) return null;
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return null;
+
+  const diffSeconds = Math.round((Date.now() - timestamp) / 1000);
+  const absoluteSeconds = Math.abs(diffSeconds);
+
+  let unit: Intl.RelativeTimeFormatUnit = "second";
+  let quantity = diffSeconds;
+  if (absoluteSeconds >= 86400) {
+    unit = "day";
+    quantity = Math.round(diffSeconds / 86400);
+  } else if (absoluteSeconds >= 3600) {
+    unit = "hour";
+    quantity = Math.round(diffSeconds / 3600);
+  } else if (absoluteSeconds >= 60) {
+    unit = "minute";
+    quantity = Math.round(diffSeconds / 60);
+  }
+
+  const formatter = new Intl.RelativeTimeFormat(undefined, { numeric: "auto" });
+  return formatter.format(-quantity, unit);
 }
 
 function managerLabel(option: ManagerOption, routeZone: string | null): string {
@@ -295,7 +319,8 @@ export default function HomePage() {
   const [uiState, setUiState] = useState<UIState>("idle");
   const [error, setError] = useState<string>("");
   const [selectedManagerAction, setSelectedManagerAction] = useState<ManagerOption | null>(null);
-  const [armedManagerAction, setArmedManagerAction] = useState<ManagerOption | null>(null);
+  const [showManagerConfirmModal, setShowManagerConfirmModal] = useState<boolean>(false);
+  const [pendingManagerAction, setPendingManagerAction] = useState<ManagerOption | null>(null);
   const [lastStartPayload, setLastStartPayload] = useState<StartDecisionRequest | null>(null);
   const [expandedTimelineDetails, setExpandedTimelineDetails] = useState<Record<string, boolean>>({});
   const approverEmail = session?.user?.email?.trim() ?? "";
@@ -349,12 +374,16 @@ export default function HomePage() {
   }, [showIntroModal]);
 
   useEffect(() => {
-    if (!armedManagerAction) return;
-    const id = window.setTimeout(() => {
-      setArmedManagerAction(null);
-    }, MANAGER_CONFIRM_TIMEOUT_MS);
-    return () => window.clearTimeout(id);
-  }, [armedManagerAction]);
+    if (!showManagerConfirmModal) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && uiState !== "processing") {
+        setShowManagerConfirmModal(false);
+        setPendingManagerAction(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [showManagerConfirmModal, uiState]);
 
   useEffect(() => {
     setExpandedTimelineDetails({});
@@ -407,7 +436,8 @@ export default function HomePage() {
       setGeoHint("");
       setCanRetryGeo(false);
       setOverrideReason("");
-      setArmedManagerAction(null);
+      setShowManagerConfirmModal(false);
+      setPendingManagerAction(null);
       setSelectedManagerAction(null);
 
       const started = await api.startDecision(payload);
@@ -446,7 +476,8 @@ export default function HomePage() {
     setGeoHint("");
     setCanRetryGeo(false);
     setOverrideReason("");
-    setArmedManagerAction(null);
+    setShowManagerConfirmModal(false);
+    setPendingManagerAction(null);
     setSelectedManagerAction(null);
     startedAtRef.current = null;
   };
@@ -495,26 +526,37 @@ export default function HomePage() {
     selectedManagerAction !== null &&
     recommendedManagerAction !== null &&
     selectedManagerAction !== recommendedManagerAction;
+  const pendingActionIsOverride =
+    pendingManagerAction !== null &&
+    recommendedManagerAction !== null &&
+    pendingManagerAction !== recommendedManagerAction;
+  const pendingActionLabel = pendingManagerAction ? managerLabel(pendingManagerAction, decision.selected_execution_zone) : "Manager action";
+  const pendingActionConsequence = pendingManagerAction
+    ? pendingManagerAction === "route"
+      ? `Workload will be routed to ${decision.selected_execution_zone ?? "the selected cleaner zone"}.`
+      : pendingManagerAction === "run_local"
+        ? "Workload will execute in the primary zone."
+        : "Workload execution will be deferred."
+    : "";
 
-  const submitManagerAction = async (option: ManagerOption) => {
-    if (!decisionId) return;
+  const submitManagerAction = async (option: ManagerOption): Promise<boolean> => {
+    if (!decisionId) return false;
     const cleanManagerId = approverEmail;
     const cleanOverrideReason = overrideReason.trim();
     const isOverride = recommendedManagerAction !== null && option !== recommendedManagerAction;
 
     if (!cleanManagerId) {
       setError("Signed-in account is missing an email address. Sign out and sign back in with Google.");
-      return;
+      return false;
     }
     if (isOverride && !cleanOverrideReason) {
       setError("Override reason is required when manager action overrides the policy recommendation.");
-      return;
+      return false;
     }
 
     try {
       setUiState("processing");
       setError("");
-      setArmedManagerAction(null);
 
       let result: DecisionResponse;
       if (option === "run_local") {
@@ -537,6 +579,7 @@ export default function HomePage() {
       setDecision(result);
       setOverrideReason("");
       setSelectedManagerAction(null);
+      setPendingManagerAction(null);
       if (result.status === "completed" || result.status === "postponed") {
         setUiState("final");
       } else if (result.status === "awaiting_approval") {
@@ -547,20 +590,32 @@ export default function HomePage() {
       } else {
         setUiState("processing");
       }
+      return true;
     } catch (err) {
       setUiState("error");
       setError(err instanceof Error ? err.message : "Decision action failed");
+      return false;
     }
   };
 
-  const onManagerAction = async (option: ManagerOption) => {
+  const onManagerAction = (option: ManagerOption) => {
     setSelectedManagerAction(option);
-    if (armedManagerAction !== option) {
-      setArmedManagerAction(option);
-      setError("");
-      return;
+    setPendingManagerAction(option);
+    if (error) setError("");
+    setShowManagerConfirmModal(true);
+  };
+
+  const onConfirmManagerAction = async () => {
+    if (!pendingManagerAction) return;
+    const submitted = await submitManagerAction(pendingManagerAction);
+    if (submitted) {
+      setShowManagerConfirmModal(false);
     }
-    await submitManagerAction(option);
+  };
+
+  const onCancelManagerAction = () => {
+    setShowManagerConfirmModal(false);
+    setPendingManagerAction(null);
   };
 
   const onDownloadAudit = async () => {
@@ -580,10 +635,13 @@ export default function HomePage() {
     }
   };
 
-  const statusForBadge = useMemo(() => {
-    if (uiState === "awaiting_approval") return "awaiting_approval" as const;
-    if (uiState === "final" || uiState === "error") return decision.status;
-    return "processing" as const;
+  const statusForBadge = useMemo<DecisionStatus | null>(() => {
+    if (uiState === "idle") return null;
+    if (uiState === "submitting" || uiState === "processing") return "processing";
+    if (uiState === "awaiting_approval") return "awaiting_approval";
+    if (uiState === "error") return "error";
+    if (decision.status === "completed" || decision.status === "postponed") return decision.status;
+    return "completed";
   }, [decision.status, uiState]);
 
   const canDownloadAudit =
@@ -616,7 +674,6 @@ export default function HomePage() {
   const isForegone = decision.execution_mode === "local" && saved > 0;
   const primaryIntensitySeverity = intensitySeverity(decision.primary_intensity, threshold);
   const selectedIntensitySeverity = intensitySeverity(decision.selected_execution_intensity, threshold);
-  const activeProcessingStep = processingStepLabel(decision, uiState);
   const currentWorkflowStepIndex = workflowStepIndex(decision, uiState);
   const showProcessingBar = uiState === "processing";
 
@@ -712,7 +769,6 @@ export default function HomePage() {
   const auditParagraphs = splitAuditParagraphs(decision.audit_report);
   const auditSourceLabel =
     decision.audit_mode === "llm" ? "AI-generated" : decision.audit_mode === "template" ? "Template" : "Pending";
-  const isAuditAiGenerated = decision.audit_mode === "llm";
   const stepConnectorWidth = Math.max(0, Math.min(currentWorkflowStepIndex, WORKFLOW_STEPS.length - 1));
   const showProgressSection = hasDecision && uiState !== "idle";
   const showDecisionSummary = hasDecision && (uiState === "processing" || uiState === "awaiting_approval" || uiState === "final");
@@ -784,6 +840,7 @@ export default function HomePage() {
         id,
         event,
         elapsedLabel: formatElapsedLabel(seconds),
+        relativeTimeLabel: formatRelativeTime(event.ts),
         hasData: Boolean(event.data && Object.keys(event.data).length > 0)
       };
     });
@@ -807,7 +864,7 @@ export default function HomePage() {
 
   return (
     <main className="px-4 py-8 md:px-8">
-      <div className="mx-auto max-w-6xl space-y-6">
+      <div className="mx-auto max-w-6xl space-y-8">
         <section className="glass-panel rounded-3xl p-6 md:p-8">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
@@ -818,24 +875,19 @@ export default function HomePage() {
               </p>
             </div>
             <div className="flex flex-wrap items-center justify-end gap-2">
-              <StatusBadge status={statusForBadge} />
-              <ThemeToggle resolvedTheme={resolvedTheme} onToggle={toggleTheme} />
+              {statusForBadge ? <StatusBadge status={statusForBadge} /> : null}
               <button
                 type="button"
-                className="rounded-full border border-zinc-300/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-zinc-200/60 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                className="btn-ghost-help interactive-base focus-ring rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide"
                 onClick={() => setShowIntroModal(true)}
               >
                 Help
               </button>
-              <div className="ml-1 flex items-center gap-2 text-xs text-fern">
-                {approverEmail && (
-                  <span className="max-w-[220px] truncate rounded-full border border-zinc-300/70 px-3 py-1 text-xs text-fern dark:border-zinc-700" title={approverEmail}>
-                    {approverEmail}
-                  </span>
-                )}
+              <div className="ml-1 flex items-center gap-2">
+                <ThemeToggle resolvedTheme={resolvedTheme} onToggle={toggleTheme} />
                 <button
                   type="button"
-                  className="rounded-full border border-zinc-300/80 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-zinc-200/60 dark:border-zinc-700 dark:hover:bg-zinc-800"
+                  className="btn-ghost-danger interactive-base focus-ring rounded-full px-3 py-1 text-xs font-semibold uppercase tracking-wide"
                   onClick={() => void signOut({ callbackUrl: "/login" })}
                 >
                   Sign out
@@ -847,10 +899,12 @@ export default function HomePage() {
 
         <section className="panel-strong rounded-3xl p-6 md:p-8">
           <div className="grid gap-5 md:grid-cols-3">
-            <label className="space-y-2 md:col-span-1">
-              <span className="text-sm font-semibold text-ink">Estimated Job Energy (kWh)</span>
+            <label className="space-y-1.5 md:col-span-1">
+              <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                Estimated Job Energy <span className="unit-accent">(kWh)</span>
+              </span>
               <input
-                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm focus-ring"
                 type="text"
                 inputMode="numeric"
                 pattern="[0-9]*"
@@ -861,10 +915,12 @@ export default function HomePage() {
                 }}
               />
             </label>
-            <label className="space-y-2 md:col-span-1">
-              <span className="text-sm font-semibold text-ink">Carbon Threshold (gCO2eq/kWh)</span>
+            <label className="space-y-1.5 md:col-span-1">
+              <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+                Carbon Threshold <span className="unit-accent">(gCO2eq/kWh)</span>
+              </span>
               <input
-                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm focus-ring"
                 type="text"
                 inputMode="numeric"
                 pattern="[0-9]*"
@@ -881,7 +937,7 @@ export default function HomePage() {
                 }}
               />
               <select
-                className="input-surface w-full rounded-xl border px-4 py-2 text-sm text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-2 text-sm text-ink shadow-sm focus-ring"
                 value={thresholdPreset}
                 onChange={(e) => {
                   const selectedPreset = e.target.value as ThresholdPresetKey;
@@ -907,10 +963,10 @@ export default function HomePage() {
                 )}
               </div>
             </label>
-            <label className="space-y-2 md:col-span-1">
-              <span className="text-sm font-semibold text-ink">Primary Grid Zone</span>
+            <label className="space-y-1.5 md:col-span-1">
+              <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Primary Grid Zone</span>
               <select
-                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-ink shadow-sm focus-ring"
                 value={zone}
                 onChange={(e) => setZone(e.target.value)}
               >
@@ -920,13 +976,10 @@ export default function HomePage() {
                   </option>
                 ))}
               </select>
-              <p className="text-xs text-fern">
-                This is the primary execution region; routing may still shift the workload to a cleaner zone.
-              </p>
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
-                  className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern transition hover:bg-fern/10"
+                  className="interactive-base focus-ring rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern hover:bg-fern/10"
                   onClick={onSuggestPrimaryZone}
                 >
                   Suggest from my location
@@ -934,7 +987,7 @@ export default function HomePage() {
                 {canRetryGeo && (
                   <button
                     type="button"
-                    className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern transition hover:bg-fern/10"
+                    className="interactive-base focus-ring rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern hover:bg-fern/10"
                     onClick={onSuggestPrimaryZone}
                   >
                     Retry location
@@ -945,7 +998,7 @@ export default function HomePage() {
                     <span className="text-xs text-fern">{geoHint}</span>
                     <button
                       type="button"
-                      className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern transition hover:bg-fern/10"
+                      className="interactive-base focus-ring rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold text-fern hover:bg-fern/10"
                       onClick={() => {
                         setGeoHint(`Using ${zoneLabel(zone)}. You can change the zone manually.`);
                         setCanRetryGeo(false);
@@ -959,12 +1012,20 @@ export default function HomePage() {
             </label>
           </div>
 
-          <div className="mt-5 grid gap-4 md:grid-cols-2">
+          <div className="mt-5 space-y-2">
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <span className="text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">Approver Email</span>
+              <button
+                type="button"
+                className="interactive-base focus-ring rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern hover:bg-fern/10"
+                onClick={() => setShowApproverProfile((value) => !value)}
+              >
+                {showApproverProfile ? "Hide Approver Profile" : "Show Approver Profile"}
+              </button>
+            </div>
             <label className="space-y-2">
-              <span className="text-xs font-semibold uppercase tracking-wide text-fern">Approver Email (required for approvals)</span>
-              <span className="block text-xs text-fern">Sourced from your signed-in Google account and stored in the backend audit trail.</span>
               <input
-                className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm"
+                className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm focus-ring"
                 type="text"
                 value={approverEmail || "Signed-in email unavailable"}
                 readOnly
@@ -975,27 +1036,14 @@ export default function HomePage() {
                 </span>
               )}
             </label>
-            <div className="space-y-2">
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  className="rounded-lg border border-fern/30 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-fern transition hover:bg-fern/10"
-                  onClick={() => setShowApproverProfile((value) => !value)}
-                >
-                  {showApproverProfile ? "Hide Approver Profile" : "Show Approver Profile"}
-                </button>
-                <span className="text-[11px] font-medium uppercase tracking-wide text-fern/85">client-side only</span>
-              </div>
-              <p className="text-sm text-fern">Local context fields help demo storytelling. They are never sent to backend APIs.</p>
-            </div>
           </div>
 
           {showApproverProfile && (
             <div className="mt-3 grid gap-3 md:grid-cols-2">
               <label className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-fern">Approver Name</span>
+                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">Approver Name</span>
                 <input
-                  className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm"
+                  className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm focus-ring"
                   type="text"
                   value={approverName}
                   onChange={(e) => setApproverName(e.target.value)}
@@ -1003,9 +1051,9 @@ export default function HomePage() {
                 />
               </label>
               <label className="space-y-2">
-                <span className="text-xs font-semibold uppercase tracking-wide text-fern">Organization</span>
+                <span className="text-xs font-semibold uppercase tracking-wide text-zinc-700 dark:text-zinc-300">Organization</span>
                 <input
-                  className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm"
+                  className="input-surface w-full rounded-xl border px-4 py-3 text-sm text-ink shadow-sm focus-ring"
                   type="text"
                   value={approverOrg}
                   onChange={(e) => setApproverOrg(e.target.value)}
@@ -1015,19 +1063,20 @@ export default function HomePage() {
             </div>
           )}
 
-          <div className="mt-6 space-y-4">
+          <div className="mt-6 space-y-5">
             {showLiveControls && (
               <div className="flex flex-wrap items-center gap-3 rounded-2xl border border-zinc-300/70 bg-zinc-100/65 p-4 dark:border-zinc-800 dark:bg-zinc-900/70">
                 <button
-                  className="rounded-xl border border-transparent bg-[#1f5f3f] px-6 py-3 text-sm font-semibold text-white transition hover:bg-[#2b7a52] disabled:cursor-not-allowed disabled:bg-[#7fae97] disabled:text-white/85 dark:bg-emerald-400 dark:text-[#04120a] dark:hover:bg-emerald-300 dark:disabled:border-zinc-600 dark:disabled:bg-zinc-700 dark:disabled:text-zinc-300"
+                  className="interactive-base focus-ring rounded-xl border border-transparent bg-[#1f5f3f] px-6 py-3 text-sm font-semibold text-white hover:bg-[#2b7a52] disabled:cursor-not-allowed disabled:bg-[#7fae97] disabled:text-white/85 dark:bg-emerald-400 dark:text-[#04120a] dark:hover:bg-emerald-300 dark:disabled:border-zinc-600 dark:disabled:bg-zinc-700 dark:disabled:text-zinc-300"
                   onClick={() => void onStart()}
                   disabled={uiState === "submitting" || uiState === "processing"}
+                  aria-busy={uiState === "submitting" || uiState === "processing"}
                 >
                   {uiState === "submitting" ? "Starting..." : "Evaluate and decide (Live)"}
                 </button>
                 {(uiState === "idle" || uiState === "submitting") && (
                   <button
-                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="secondary-button interactive-base focus-ring disabled:cursor-not-allowed disabled:opacity-60"
                     onClick={() => setShowDemoScenarios((value) => !value)}
                     disabled={uiState === "submitting"}
                   >
@@ -1045,21 +1094,21 @@ export default function HomePage() {
                 </p>
                 <div className="mt-3 flex flex-wrap gap-3">
                   <button
-                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="btn-ghost-demo-clean interactive-base focus-ring disabled:cursor-not-allowed disabled:opacity-60"
                     onClick={() => void onStart("clean_local")}
                     disabled={uiState === "submitting"}
                   >
                     {DEMO_SCENARIO_LABELS.clean_local}
                   </button>
                   <button
-                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="btn-ghost-demo-route interactive-base focus-ring disabled:cursor-not-allowed disabled:opacity-60"
                     onClick={() => void onStart("routeable_dirty")}
                     disabled={uiState === "submitting"}
                   >
                     {DEMO_SCENARIO_LABELS.routeable_dirty}
                   </button>
                   <button
-                    className="rounded-xl border border-fern px-4 py-3 text-sm font-semibold text-fern transition hover:bg-fern/10 disabled:cursor-not-allowed disabled:opacity-60"
+                    className="btn-ghost-demo-approval interactive-base focus-ring disabled:cursor-not-allowed disabled:opacity-60"
                     onClick={() => void onStart("non_routeable_dirty")}
                     disabled={uiState === "submitting"}
                   >
@@ -1070,7 +1119,7 @@ export default function HomePage() {
             )}
 
             {showApprovalControls && (
-              <div className="rounded-2xl border border-amber-300/70 bg-zinc-100/80 p-4 dark:border-amber-700/70 dark:bg-zinc-900/80">
+              <div className="rounded-2xl border border-amber-300/70 bg-zinc-100/80 p-4 ring-1 ring-amber-500/20 dark:border-amber-700/70 dark:bg-zinc-900/80">
                 <p className="text-xs font-semibold uppercase tracking-wide text-amber-800 dark:text-amber-300">Manager Approval Required</p>
                 <div className="mt-3 rounded-xl border border-moss/25 bg-zinc-50/95 p-3 text-sm text-ink dark:border-moss/40 dark:bg-zinc-900/65">
                   <p className="text-xs font-semibold uppercase tracking-wide text-fern">Decision Briefing</p>
@@ -1101,29 +1150,19 @@ export default function HomePage() {
                 </div>
                 <div className="mt-3 flex flex-wrap gap-3">
                   {decision.manager_options.map((option) => {
-                    const isArmed = armedManagerAction === option;
                     const label = managerLabel(option, decision.selected_execution_zone);
                     return (
                       <button
                         key={option}
-                        className={`rounded-xl border px-6 py-3 text-sm font-semibold transition ${
-                          isArmed
-                            ? "border-amber-500 bg-amber-100 text-amber-900 hover:bg-amber-200 dark:border-amber-500 dark:bg-amber-900/40 dark:text-amber-200"
-                            : "border-fern text-fern hover:bg-fern/10"
-                        }`}
+                        className="secondary-button interactive-base focus-ring px-6"
                         onClick={() => void onManagerAction(option)}
                         aria-label={`Manager action: ${label}`}
                       >
-                        {isArmed ? `Confirm: ${label}` : label}
+                        {label}
                       </button>
                     );
                   })}
                 </div>
-                {armedManagerAction && (
-                  <p className="mt-3 text-xs text-amber-800 dark:text-amber-300">
-                    Click the same action again within {MANAGER_CONFIRM_TIMEOUT_MS / 1000}s to confirm.
-                  </p>
-                )}
 
                 {selectedActionIsOverride && (
                   <div className="mt-4 grid gap-3">
@@ -1132,7 +1171,7 @@ export default function HomePage() {
                         Override Reason (required)
                       </span>
                       <textarea
-                        className="input-surface min-h-20 w-full rounded-xl border border-amber-300 px-4 py-3 text-sm text-ink shadow-sm dark:border-amber-800"
+                        className="input-surface focus-ring min-h-20 w-full rounded-xl border border-amber-300 px-4 py-3 text-sm text-ink shadow-sm dark:border-amber-800"
                         value={overrideReason}
                         onChange={(e) => setOverrideReason(e.target.value)}
                         placeholder="This action overrides the policy recommendation. Provide justification."
@@ -1146,13 +1185,13 @@ export default function HomePage() {
             {showFinalControls && (
               <div className="flex flex-wrap gap-3">
                 <button
-                  className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10 dark:hover:bg-zinc-800/70"
+                  className="secondary-button interactive-base focus-ring"
                   onClick={onResetDecision}
                 >
                   New Decision
                 </button>
                 <button
-                  className="rounded-xl bg-ember px-6 py-3 text-sm font-semibold text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="interactive-base focus-ring rounded-xl bg-ember px-6 py-3 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => void onDownloadAudit()}
                   disabled={!canDownloadAudit}
                 >
@@ -1164,14 +1203,14 @@ export default function HomePage() {
             {showErrorControls && (
               <div className="flex flex-wrap gap-3">
                 <button
-                  className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10 disabled:opacity-50 dark:hover:bg-zinc-800/70"
+                  className="secondary-button interactive-base focus-ring disabled:opacity-50"
                   onClick={() => void onRetryLastDecision()}
                   disabled={!lastStartPayload}
                 >
                   Retry Last Decision
                 </button>
                 <button
-                  className="rounded-xl border border-ink px-4 py-3 text-sm font-semibold text-ink transition hover:bg-ink/10 dark:hover:bg-zinc-800/70"
+                  className="secondary-button interactive-base focus-ring"
                   onClick={onResetDecision}
                 >
                   New Decision
@@ -1212,7 +1251,6 @@ export default function HomePage() {
                   );
                 })}
               </ol>
-              {activeProcessingStep && <p className="mt-3 text-sm text-fern">Current stage: {activeProcessingStep}</p>}
               {showProcessingBar && (
                 <div className="mt-3 h-1.5 w-full overflow-hidden rounded-full bg-moss/20 dark:bg-moss/35">
                   <span className="block h-full w-1/3 rounded-full bg-emerald-500 motion-safe:animate-[indeterminate_1.35s_ease-in-out_infinite] dark:bg-emerald-400" />
@@ -1220,7 +1258,7 @@ export default function HomePage() {
               )}
             </div>
           ) : (
-            <p className="mt-4 text-sm text-fern">Start a live or demo decision to populate metrics, policy output, tradeoffs, and timeline.</p>
+            <p className="mt-4 text-sm text-fern">Start a decision to view metrics, tradeoffs, and execution timelines.</p>
           )}
 
           {showDecisionSummary && <p className="mt-3 rounded-lg border border-moss/30 bg-moss/5 px-3 py-2 text-sm text-ink">{decisionExplanation}</p>}
@@ -1336,11 +1374,6 @@ export default function HomePage() {
                   <article className="panel-strong rounded-2xl p-5">
                     <h2 className="text-lg font-bold text-ink">Audit Report</h2>
                     <p className="mt-2 text-xs uppercase tracking-wide text-fern">Summary Source: {auditSourceLabel}</p>
-                    {isAuditAiGenerated && (
-                      <p className="mt-1 text-xs text-fern">
-                        AI-generated summary; verify operational decisions against policy output and timeline.
-                      </p>
-                    )}
                     {auditParagraphs.length > 0 ? (
                       <div className="mt-3 space-y-3 text-sm text-ink">
                         {auditParagraphs.map((paragraph, idx) => (
@@ -1360,9 +1393,6 @@ export default function HomePage() {
                 <div className="border-t border-zinc-300/60 dark:border-zinc-800/70" />
                 <section className="section-reveal panel-strong rounded-2xl p-5">
                   <h2 className="text-lg font-bold text-ink">Execution Tradeoff Comparison</h2>
-                  <p className="mt-2 text-xs text-fern">
-                    Compares operational options on emissions, latency, residency, and estimated cost impact.
-                  </p>
                   <div className="mt-4 overflow-x-auto rounded-xl border border-moss/20">
                     <table className="min-w-full divide-y divide-moss/20 text-sm">
                       <thead className="bg-moss/10 text-left">
@@ -1381,13 +1411,13 @@ export default function HomePage() {
                           return (
                             <tr
                               key={row.option}
-                              className={`${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} ${
+                              className={`interactive-base ${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} hover:bg-zinc-200/50 dark:hover:bg-zinc-800/70 ${
                                 selected ? "ring-1 ring-inset ring-emerald-300/50 dark:ring-emerald-700/40" : ""
                               }`}
                             >
                               <td className={`px-4 py-3 text-ink ${selected ? "border-l-2 border-emerald-500 font-bold" : "font-semibold"}`}>{row.option}</td>
                               <td className="px-4 py-3 text-ink">{row.zone}</td>
-                              <td className="px-4 py-3 text-ink">{row.carbon}</td>
+                              <td className="px-4 py-3 font-mono font-semibold text-ink">{row.carbon}</td>
                               <td className="px-4 py-3 text-ink">{row.latency}</td>
                               <td className="px-4 py-3 text-ink">{row.dataResidency}</td>
                               <td className="px-4 py-3 text-ink">{row.costImpact}</td>
@@ -1427,17 +1457,23 @@ export default function HomePage() {
                     </thead>
                     <tbody className="divide-y divide-moss/10 bg-zinc-50/80 dark:bg-zinc-900/60">
                       {decision.routing_top3.length > 0 ? (
-                        decision.routing_top3.map((candidate, index) => (
-                          <tr
-                            key={`${candidate.zone}-${candidate.datetime ?? "none"}`}
-                            className={index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"}
-                          >
-                            <td className="px-4 py-3 text-ink">{candidate.zone}</td>
-                            <td className="px-4 py-3 text-right font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
-                            <td className="px-4 py-3 text-ink">{formatTimestamp(candidate.datetime)}</td>
-                            <td className="px-4 py-3 text-ink">{candidate.ok ? "OK" : `Error: ${candidate.error ?? "unknown"}`}</td>
-                          </tr>
-                        ))
+                        decision.routing_top3.map((candidate, index) => {
+                          const relativeUpdated = formatRelativeTime(candidate.datetime);
+                          return (
+                            <tr
+                              key={`${candidate.zone}-${candidate.datetime ?? "none"}`}
+                              className={`interactive-base ${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} hover:bg-zinc-200/50 dark:hover:bg-zinc-800/70`}
+                            >
+                              <td className="px-4 py-3.5 text-ink">{candidate.zone}</td>
+                              <td className="px-4 py-3.5 text-right font-semibold text-ink">{candidate.carbonIntensity ?? "-"}</td>
+                              <td className="px-4 py-3.5 text-ink">
+                                {formatTimestamp(candidate.datetime)}
+                                {relativeUpdated ? <span className="text-xs text-fern"> · {relativeUpdated}</span> : null}
+                              </td>
+                              <td className="px-4 py-3.5 text-ink">{candidate.ok ? "OK" : `Error: ${candidate.error ?? "unknown"}`}</td>
+                            </tr>
+                          );
+                        })
                       ) : (
                         <tr>
                           <td className="px-4 py-6 text-fern" colSpan={4}>
@@ -1466,7 +1502,6 @@ export default function HomePage() {
             {showTimelineSection && (
               <section className="section-reveal panel-strong rounded-2xl p-5">
                 <h2 className="text-lg font-bold text-ink">Decision Replay Timeline</h2>
-                <p className="mt-2 text-xs text-fern">Elapsed times show workflow pacing, including human-in-the-loop approval delay.</p>
                 {timelineRows.length === 0 ? (
                   <p className="mt-3 text-sm text-fern">Timeline appears as the workflow executes.</p>
                 ) : (
@@ -1487,21 +1522,26 @@ export default function HomePage() {
                           return (
                             <Fragment key={row.id}>
                               <tr className={`${index % 2 === 0 ? "bg-zinc-50/70 dark:bg-zinc-900/45" : "bg-zinc-100/70 dark:bg-zinc-900/75"} ${highlighted ? "border-l-2 border-emerald-500" : ""}`}>
-                                <td className="px-4 py-3 font-mono text-xs text-fern">{row.elapsedLabel}</td>
-                                <td className="px-4 py-3">
+                                <td className="px-4 py-4 font-mono text-xs font-semibold text-fern">{row.elapsedLabel}</td>
+                                <td className="px-4 py-4">
                                   <span className="inline-flex rounded-full border border-moss/30 px-2 py-1 text-xs font-semibold text-fern">
                                     {row.event.stage}
                                   </span>
                                 </td>
-                                <td className="px-4 py-3 text-ink">
+                                <td className="px-4 py-4 text-ink">
                                   {row.event.message}
-                                  <p className="mt-1 text-xs text-fern">{formatTimestamp(row.event.ts)}</p>
+                                  <p className="mt-1 text-xs text-fern">
+                                    {formatTimestamp(row.event.ts)}
+                                    {row.relativeTimeLabel ? ` · ${row.relativeTimeLabel}` : ""}
+                                  </p>
                                 </td>
-                                <td className="px-4 py-3">
+                                <td className="px-4 py-4">
                                   {row.hasData ? (
                                     <button
                                       type="button"
-                                      className="text-sm text-fern underline-offset-2 transition hover:text-ink hover:underline"
+                                      className="interactive-base focus-ring inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-300/80 bg-zinc-200/50 text-fern hover:bg-zinc-300/70 hover:text-ink dark:border-zinc-700 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+                                      aria-label={`${expanded ? "Hide" : "Show"} technical details for ${row.event.stage}`}
+                                      title={`${expanded ? "Hide" : "Show"} technical details`}
                                       onClick={() =>
                                         setExpandedTimelineDetails((current) => ({
                                           ...current,
@@ -1509,7 +1549,13 @@ export default function HomePage() {
                                         }))
                                       }
                                     >
-                                      {expanded ? "Hide technical details" : "Show technical details"}
+                                      <svg
+                                        aria-hidden="true"
+                                        viewBox="0 0 16 16"
+                                        className={`h-3.5 w-3.5 fill-none stroke-current transition-transform duration-200 ${expanded ? "rotate-90" : "rotate-0"}`}
+                                      >
+                                        <path d="M6 3l5 5-5 5" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+                                      </svg>
                                     </button>
                                   ) : (
                                     <span className="text-xs text-fern">-</span>
@@ -1518,7 +1564,7 @@ export default function HomePage() {
                               </tr>
                               {row.hasData && expanded && (
                                 <tr className="bg-zinc-100/80 dark:bg-zinc-950/70">
-                                  <td className="px-4 py-3" colSpan={4}>
+                                  <td className="px-4 py-4" colSpan={4}>
                                     <pre className="overflow-x-auto rounded-md border border-moss/20 bg-zinc-50 px-3 py-3 text-xs text-slate-700 dark:bg-zinc-900 dark:text-slate-200">
                                       {JSON.stringify(row.event.data, null, 2)}
                                     </pre>
@@ -1552,6 +1598,48 @@ export default function HomePage() {
           </div>
         )}
       </div>
+
+      {showManagerConfirmModal && pendingManagerAction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Confirm manager action"
+            className="panel-strong w-full max-w-lg rounded-2xl p-6 shadow-2xl"
+          >
+            <h2 className="text-xl font-bold text-ink">Confirm manager action</h2>
+            <p className="mt-3 text-sm text-fern">
+              You are about to submit: <span className="font-semibold text-ink">{pendingActionLabel}</span>
+            </p>
+            <p className="mt-2 text-sm text-fern">{pendingActionConsequence}</p>
+            {pendingActionIsOverride && (
+              <p className="mt-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900 dark:border-amber-800 dark:bg-amber-900/25 dark:text-amber-200">
+                This action overrides the current policy recommendation. Provide override justification before confirming.
+              </p>
+            )}
+            {error && <p className="mt-3 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-900/20 dark:text-red-300">{error}</p>}
+            <div className="mt-6 flex justify-end gap-3">
+              <button
+                type="button"
+                className="secondary-button interactive-base focus-ring py-2"
+                onClick={onCancelManagerAction}
+                disabled={uiState === "processing"}
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="interactive-base focus-ring rounded-xl bg-ember px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                onClick={() => void onConfirmManagerAction()}
+                disabled={uiState === "processing"}
+                aria-busy={uiState === "processing"}
+              >
+                {uiState === "processing" ? "Submitting..." : `Confirm ${pendingActionLabel}`}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showIntroModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4 backdrop-blur-[2px]">
@@ -1603,7 +1691,7 @@ export default function HomePage() {
             <div className="mt-6 flex justify-end gap-3">
               <button
                 type="button"
-                className="rounded-xl border border-fern px-4 py-2 text-sm font-semibold text-fern transition hover:bg-fern/10"
+                className="secondary-button interactive-base focus-ring py-2"
                 onClick={dismissIntroModal}
               >
                 Got it

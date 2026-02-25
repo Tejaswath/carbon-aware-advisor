@@ -2,6 +2,54 @@
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  :where(button, a, input, select, textarea, [role="button"]) {
+    @apply transition-all duration-200;
+  }
+
+  :where(button, a, input, select, textarea, [role="button"]):focus-visible {
+    @apply outline-none ring-2 ring-emerald-500 ring-offset-2 ring-offset-white dark:ring-offset-black;
+  }
+}
+
+@layer components {
+  .interactive-base {
+    @apply transition-all duration-200;
+  }
+
+  .focus-ring {
+    @apply focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2 focus-visible:ring-offset-white dark:focus-visible:ring-offset-black;
+  }
+
+  .secondary-button {
+    @apply rounded-xl border border-zinc-300/80 px-4 py-3 text-sm font-semibold text-fern hover:border-zinc-400 hover:bg-zinc-200/60 hover:text-ink dark:border-zinc-700 dark:hover:border-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-100;
+  }
+
+  .btn-ghost-help {
+    @apply rounded-xl border border-amber-300/90 px-4 py-3 text-sm font-semibold text-amber-700 hover:bg-amber-100/65 hover:text-amber-800 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-900/25 dark:hover:text-amber-200;
+  }
+
+  .btn-ghost-danger {
+    @apply rounded-xl border border-red-300/90 px-4 py-3 text-sm font-semibold text-red-700 hover:bg-red-100/65 hover:text-red-800 dark:border-red-700 dark:text-red-300 dark:hover:bg-red-900/25 dark:hover:text-red-200;
+  }
+
+  .btn-ghost-demo-clean {
+    @apply rounded-xl border border-emerald-300/90 px-4 py-3 text-sm font-semibold text-emerald-700 hover:bg-emerald-100/65 hover:text-emerald-800 dark:border-emerald-700 dark:text-emerald-300 dark:hover:bg-emerald-900/25 dark:hover:text-emerald-200;
+  }
+
+  .btn-ghost-demo-route {
+    @apply rounded-xl border border-blue-300/90 px-4 py-3 text-sm font-semibold text-blue-700 hover:bg-blue-100/65 hover:text-blue-800 dark:border-blue-700 dark:text-blue-300 dark:hover:bg-blue-900/25 dark:hover:text-blue-200;
+  }
+
+  .btn-ghost-demo-approval {
+    @apply rounded-xl border border-amber-300/90 px-4 py-3 text-sm font-semibold text-amber-700 hover:bg-amber-100/65 hover:text-amber-800 dark:border-amber-700 dark:text-amber-300 dark:hover:bg-amber-900/25 dark:hover:text-amber-200;
+  }
+
+  .unit-accent {
+    @apply text-amber-700 dark:text-amber-300;
+  }
+}
+
 :root {
   --color-ink: 24 24 27;
   --color-fern: 82 82 91;
